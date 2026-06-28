@@ -19,6 +19,13 @@ flatpak-builder --user --install --force-clean build-dir com.yanklog.app.yml
 flatpak run com.yanklog.app
 ```
 
+Install the matching runtime, SDK, and Rust extension first:
+
+```sh
+flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+flatpak install --user flathub org.gnome.Platform//49 org.gnome.Sdk//49 org.freedesktop.Sdk.Extension.rust-stable//25.08
+```
+
 The manifest builds from the public Git source pinned in `com.yanklog.app.yml` and uses `generated-sources.json` for vendored Cargo dependencies.
 
 ## Regenerate Cargo Sources

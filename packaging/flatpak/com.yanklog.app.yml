@@ -1,7 +1,9 @@
 app-id: com.yanklog.app
 runtime: org.gnome.Platform
-runtime-version: "48"
+runtime-version: "49"
 sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
 command: yanklog
 finish-args:
   - --share=ipc
@@ -13,6 +15,7 @@ modules:
   - name: yanklog
     buildsystem: simple
     build-options:
+      append-path: /usr/lib/sdk/rust-stable/bin
       env:
         CARGO_HOME: /run/build/yanklog/cargo
     build-commands:
