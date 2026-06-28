@@ -16,11 +16,13 @@ modules:
       env:
         CARGO_HOME: /run/build/yanklog/cargo
     build-commands:
-      - cargo build --release -p yanklog-linux-native --bin yanklog
+      - cargo build --release --offline -p yanklog-linux-native --bin yanklog
       - install -Dm755 target/release/yanklog /app/bin/yanklog
       - install -Dm644 com.yanklog.app.desktop /app/share/applications/com.yanklog.app.desktop
       - install -Dm644 assets/logo.svg /app/share/icons/hicolor/scalable/apps/yanklog.svg
       - install -Dm644 packaging/flatpak/com.yanklog.app.metainfo.xml /app/share/metainfo/com.yanklog.app.metainfo.xml
     sources:
-      - type: dir
-        path: ../..
+      - type: git
+        url: https://github.com/thisiseesmaeel/yanklog-linux.git
+        commit: 6ea60b642e99c95007fd29e924d8b53be933dd81
+      - generated-sources.json

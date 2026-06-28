@@ -1,16 +1,15 @@
 # Flatpak Packaging
 
-This directory contains starter Flatpak packaging for the open-source Linux app.
+This directory contains Flatpak packaging for the open-source Linux app.
 
-It is not a submitted Flathub manifest yet. Flathub submission still needs:
+It is not submitted to Flathub yet. Flathub submission still needs:
 
-- a public Git repository URL for the open-source Linux/core source;
-- a signed or immutable release tag;
-- generated Cargo source metadata, usually produced with `flatpak-cargo-generator.py`;
-- final sandbox review for clipboard, tray/status-notifier, and desktop integration behavior;
+- a pushed public Git commit matching the manifest `commit`;
+- a release tag, if you want the manifest to use `tag` as well as `commit`;
+- final sandbox review for clipboard, tray/status-notifier, and desktop integration behavior on Linux;
 - published screenshots and app metadata that match Flathub requirements.
 
-## Local Test Build
+## Build
 
 From this directory:
 
@@ -20,27 +19,33 @@ flatpak-builder --user --install --force-clean build-dir com.yanklog.app.yml
 flatpak run com.yanklog.app
 ```
 
-The local manifest builds from the repository checkout with:
+The manifest builds from the public Git source pinned in `com.yanklog.app.yml` and uses `generated-sources.json` for vendored Cargo dependencies.
 
-```yaml
-sources:
-  - type: dir
-    path: ../..
+## Regenerate Cargo Sources
+
+After `Cargo.lock` changes, regenerate `generated-sources.json`:
+
+```sh
+curl -fsSLO https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/master/cargo/flatpak-cargo-generator.py
+python3 -m pip install --user tomlkit aiohttp
+python3 flatpak-cargo-generator.py ../../Cargo.lock -o generated-sources.json
+rm flatpak-cargo-generator.py
 ```
 
-For Flathub, replace that source with a public tagged Git source and add generated Cargo sources.
+## Release Pinning
 
-## Flathub Conversion Sketch
-
-After publishing the Linux/core source:
+The current manifest pins an exact commit:
 
 ```yaml
 sources:
   - type: git
-    url: https://github.com/<owner>/<repo>.git
-    tag: v1.2.0
-    commit: <release-commit>
+    url: https://github.com/thisiseesmaeel/yanklog-linux.git
+    commit: 6ea60b642e99c95007fd29e924d8b53be933dd81
   - generated-sources.json
 ```
 
-Generate Cargo sources from the public `Cargo.lock` before submitting.
+After creating a release tag, add it next to the commit:
+
+```yaml
+tag: v1.2.0
+```
