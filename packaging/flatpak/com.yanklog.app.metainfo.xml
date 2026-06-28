@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.yanklog.app</id>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <name>YankLog</name>
+  <summary>Local-first clipboard history for Linux</summary>
+  <description>
+    <p>
+      YankLog keeps copied text searchable on your device, with local encrypted storage,
+      pause controls, retention settings, and a keyboard-first quick picker.
+    </p>
+  </description>
+  <launchable type="desktop-id">com.yanklog.app.desktop</launchable>
+  <provides>
+    <binary>yanklog</binary>
+  </provides>
+  <url type="homepage">https://yanklog.com</url>
+  <developer id="com.yanklog">
+    <name>Ismail Safwat</name>
+  </developer>
+  <categories>
+    <category>Utility</category>
+  </categories>
+  <releases>
+    <release version="1.2.0" date="2026-06-28" />
+  </releases>
+  <content_rating type="oars-1.1" />
+</component>

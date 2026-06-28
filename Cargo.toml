@@ -1,0 +1,16 @@
+[workspace]
+members = [
+    "crates/yanklog-core",
+    "apps/linux",
+]
+default-members = [
+    "crates/yanklog-core",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+authors = ["Ismail Safwat <ismail@hey.com>"]
+
+[profile.release.package.yanklog-core]
+debug = 1

@@ -1,0 +1,17 @@
+[Desktop Entry]
+Type=Application
+Name=YankLog
+GenericName=Clipboard Manager
+Comment=Clipboard manager for Linux
+Exec=yanklog
+Icon=yanklog
+Terminal=false
+Categories=Utility;
+Keywords=clipboard;history;copy;paste;yanklog;
+StartupNotify=true
+Actions=QuickPick;
+
+[Desktop Action QuickPick]
+Name=Quick Pick
+Exec=yanklog --pick
+Icon=yanklog

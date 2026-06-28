@@ -1,0 +1,114 @@
+name: Build AppImages
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version. Leave empty to use apps/linux/Cargo.toml."
+        required: false
+        type: string
+  push:
+    tags:
+      - "v*"
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  appimage:
+    name: Linux AppImage (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    container:
+      image: ubuntu:22.04
+    steps:
+      - name: Install system dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            build-essential \
+            ca-certificates \
+            curl \
+            desktop-file-utils \
+            file \
+            fuse \
+            git \
+            libadwaita-1-dev \
+            libayatana-appindicator3-dev \
+            libgtk-4-dev \
+            librsvg2-bin \
+            patchelf \
+            pkg-config
+          apt-get install -y libfuse2 || apt-get install -y libfuse2t64 || true
+          ldd --version | head -n 1
+
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        env:
+          VERSION_INPUT: ${{ github.event.inputs.version || '' }}
+        run: |
+          if [[ -n "${VERSION_INPUT}" ]]; then
+            version="${VERSION_INPUT}"
+          elif [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="$(awk -F'"' '/^version = "/ { print $2; exit }' apps/linux/Cargo.toml)"
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Test core
+        run: cargo test -p yanklog-core
+
+      - name: Build AppImage
+        run: ./build-appimage.sh --version "${{ steps.version.outputs.version }}" --arch "${{ matrix.arch }}"
+
+      - name: Upload AppImage artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: yanklog-appimage-${{ matrix.arch }}
+          path: |
+            dist/appimage/yanklog-${{ steps.version.outputs.version }}-linux-${{ matrix.arch }}.AppImage
+            dist/appimage/yanklog-${{ steps.version.outputs.version }}-linux-${{ matrix.arch }}.AppImage.sha256
+            dist/appimage/yanklog-${{ steps.version.outputs.version }}-linux-${{ matrix.arch }}.AppImage.buildinfo
+          if-no-files-found: error
+
+  github-release:
+    name: GitHub Release
+    needs: appimage
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v7
+        with:
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          if gh release view "$tag" --repo "$GH_REPO" >/dev/null 2>&1; then
+            gh release upload "$tag" release-artifacts/* --clobber --repo "$GH_REPO"
+          else
+            gh release create "$tag" release-artifacts/* --title "$tag" --notes "Native yanklog Linux AppImage release." --repo "$GH_REPO"
+          fi
