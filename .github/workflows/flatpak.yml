@@ -33,4 +33,3 @@ jobs:
           manifest-path: packaging/flatpak/com.yanklog.YankLog.yml
           cache-key: flatpak-builder-${{ matrix.arch }}-${{ github.sha }}
           arch: ${{ matrix.arch }}
-          artifact-name: yanklog-flatpak-${{ matrix.arch }}
