@@ -58,14 +58,14 @@ sudo apt install -y \
   patchelf \
   pkg-config
 
-./build-appimage.sh --version 1.2.0 --arch x86_64
+./build-appimage.sh --version 1.3.0 --arch x86_64
 ```
 
 Then compare:
 
 ```sh
-cat dist/appimage/yanklog-1.2.0-linux-x86_64.AppImage.sha256
-cat dist/appimage/yanklog-1.2.0-linux-x86_64.AppImage.buildinfo
+cat dist/appimage/yanklog-1.3.0-linux-x86_64.AppImage.sha256
+cat dist/appimage/yanklog-1.3.0-linux-x86_64.AppImage.buildinfo
 ```
 
 ## Current Limitations

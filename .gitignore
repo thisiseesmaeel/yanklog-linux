@@ -1,0 +1,7 @@
+/target/
+/dist/
+/AppDir/
+/*.AppImage
+*.AppImage.sha256
+**/.DS_Store
+*.log

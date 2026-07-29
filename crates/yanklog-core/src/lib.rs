@@ -1,3 +1,4 @@
+pub mod backup;
 mod clipboard;
 mod config;
 mod database;
@@ -10,7 +11,10 @@ pub use clipboard::{copy_to_clipboard, ClipboardMonitor};
 pub use config::{format_timestamp, Config, Keybindings, Privacy, Retention, ThemePreference};
 pub use database::{ClipboardEntry, Database};
 pub use profile::{Platform, Profile};
-pub use updater::{check_for_update, install_update as install_profile_update};
+pub use updater::{
+    check_for_update, install_update as install_profile_update,
+    release_notes as update_release_notes,
+};
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum YanklogError {

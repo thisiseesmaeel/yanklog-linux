@@ -1,0 +1,12 @@
+YankLog 1.3 brings the privacy, reliability, and interface improvements from the macOS release to Linux.
+
+- Search complete clipboard histories with responsive paging and result counts.
+- Find, copy, pin, and remove clips faster with the redesigned keyboard-first Quick Pick.
+- Export password-encrypted backups and restore history, pinned state, timestamps, and settings.
+- Protect the database key with Linux Secret Service, with a compatible protected-file fallback.
+- Pause monitoring for 15 minutes, one hour, until tomorrow, or indefinitely.
+- Clear history safely with confirmation, keep pinned items, and undo individual deletions.
+- Configure secret detection, one-time-code filtering, retention, ignored patterns, and startup behavior in auto-saving settings.
+- Get started with first-run onboarding and desktop-specific shortcut guidance.
+
+This release also includes refreshed native styling, a state-aware tray menu, update release notes, and general reliability improvements.

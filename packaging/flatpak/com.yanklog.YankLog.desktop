@@ -1,0 +1,17 @@
+[Desktop Entry]
+Type=Application
+Name=YankLog
+GenericName=Clipboard Manager
+Comment=Keep searchable clipboard history on this device
+Exec=yanklog
+Icon=com.yanklog.YankLog
+Terminal=false
+Categories=Utility;
+Keywords=clipboard;history;copy;paste;
+StartupNotify=true
+Actions=QuickPick;
+
+[Desktop Action QuickPick]
+Name=Quick Pick
+Exec=yanklog --pick
+Icon=com.yanklog.YankLog

@@ -43,7 +43,7 @@ Manual artifact build:
 3. Go to `Actions`.
 4. Select `Build AppImages`.
 5. Click `Run workflow`.
-6. Leave `version` empty to use `apps/linux/Cargo.toml`, or enter a version such as `1.2.0`.
+6. Leave `version` empty to use `apps/linux/Cargo.toml`, or enter a version such as `1.3.0`.
 7. Download both workflow artifacts when the jobs finish:
    - `yanklog-appimage-x86_64.zip`
    - `yanklog-appimage-aarch64.zip`
@@ -53,8 +53,8 @@ GitHub downloads workflow artifacts as ZIP files. The publish script accepts tho
 Release build:
 
 ```sh
-git tag v1.2.0
-git push origin v1.2.0
+git tag v1.3.0
+git push origin v1.3.0
 ```
 
 Pushing a tag that starts with `v` creates a GitHub Release and uploads both AppImages automatically.
@@ -74,15 +74,15 @@ sudo apt install -y build-essential pkg-config libgtk-4-dev libadwaita-1-dev lib
 For a local AppImage build on Linux:
 
 ```sh
-./build-appimage.sh --version 1.2.0
+./build-appimage.sh --version 1.3.0
 ```
 
 Output:
 
 ```text
-dist/appimage/yanklog-1.2.0-linux-<arch>.AppImage
-dist/appimage/yanklog-1.2.0-linux-<arch>.AppImage.sha256
-dist/appimage/yanklog-1.2.0-linux-<arch>.AppImage.buildinfo
+dist/appimage/yanklog-1.3.0-linux-<arch>.AppImage
+dist/appimage/yanklog-1.3.0-linux-<arch>.AppImage.sha256
+dist/appimage/yanklog-1.3.0-linux-<arch>.AppImage.buildinfo
 ```
 
 The script updates Cargo package versions when `--version` differs from the current manifest version.
@@ -93,7 +93,7 @@ After you have both architecture artifacts, publish them to R2. If you downloade
 
 ```sh
 ./publish-web-release.sh \
-  --version 1.2.0 \
+  --version 1.3.0 \
   --x86_64 ~/Downloads/yanklog-appimage-x86_64.zip \
   --aarch64 ~/Downloads/yanklog-appimage-aarch64.zip
 ```
@@ -102,18 +102,18 @@ Raw local AppImage files are also supported:
 
 ```sh
 ./publish-web-release.sh \
-  --version 1.2.0 \
-  --x86_64 dist/yanklog-1.2.0-linux-x86_64.AppImage \
-  --aarch64 dist/yanklog-1.2.0-linux-aarch64.AppImage
+  --version 1.3.0 \
+  --x86_64 dist/yanklog-1.3.0-linux-x86_64.AppImage \
+  --aarch64 dist/yanklog-1.3.0-linux-aarch64.AppImage
 ```
 
 Use a non-default bucket only when needed:
 
 ```sh
 ./publish-web-release.sh \
-  --version 1.2.0 \
-  --x86_64 dist/yanklog-1.2.0-linux-x86_64.AppImage \
-  --aarch64 dist/yanklog-1.2.0-linux-aarch64.AppImage \
+  --version 1.3.0 \
+  --x86_64 dist/yanklog-1.3.0-linux-x86_64.AppImage \
+  --aarch64 dist/yanklog-1.3.0-linux-aarch64.AppImage \
   --r2-bucket yanklog-downloads
 ```
 
@@ -150,9 +150,22 @@ Build provenance is published next to each AppImage as `.buildinfo`. See [REPROD
 
 ## Flatpak / Flathub
 
-Starter Flatpak packaging lives in `packaging/flatpak/`.
+Production Flatpak packaging lives in `packaging/flatpak/` and uses the app ID
+`com.yanklog.YankLog`. The `Build Flatpak` GitHub Actions workflow builds both
+`x86_64` and `aarch64` bundles against the GNOME 50 runtime.
 
-The current manifest is for local testing from this checkout. Before submitting to Flathub, publish the Linux/core source, switch the manifest source to a tagged public Git URL, generate Cargo source metadata, and complete a sandbox review.
+The app builds without network access, uses generated Cargo source metadata, and
+has no broad host filesystem access. It uses X11 directly and XWayland on Wayland
+desktops because its current clipboard backend is X11-based. Flatpak updates are
+managed by the user's software center or `flatpak update`; the direct-download
+`--update` flow is disabled in the sandbox.
+
+The upstream manifest intentionally builds from the current checkout so CI can
+test untagged commits. For a Flathub submission, copy the manifest into the
+Flathub repository and replace its local `dir` source with this public repository
+at a released tag and the tag's exact commit. See
+[`packaging/flatpak/README.md`](packaging/flatpak/README.md) for the commands and
+submission checklist.
 
 ## Linux Compatibility
 

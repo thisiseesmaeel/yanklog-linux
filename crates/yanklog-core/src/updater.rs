@@ -6,8 +6,8 @@ use std::process::{Command, Stdio};
 use crate::profile::{Platform, Profile};
 
 const DEFAULT_DOWNLOADS_ROOT_URL: &str = "https://downloads.yanklog.com";
-const DEFAULT_LINUX_INSTALL_SCRIPT_URL: &str = "https://downloads.yanklog.com/install.sh";
 const DEFAULT_MACOS_INSTALL_SCRIPT_URL: &str = "https://downloads.yanklog.com/install-macos.sh";
+const BUNDLED_LINUX_INSTALL_SCRIPT: &str = include_str!("../../../install.sh");
 
 pub fn check_for_update(
     profile: &Profile,
@@ -36,19 +36,33 @@ pub fn check_for_update(
     }
 }
 
+pub fn release_notes(profile: &Profile, version: &str) -> Result<Option<String>, String> {
+    let version = sanitize_version(version)?;
+    let url = format!(
+        "{}/release-notes-{}.txt",
+        platform_downloads_base_url(profile.platform),
+        version
+    );
+    match download_text(&url) {
+        Ok(notes) if !notes.trim().is_empty() => Ok(Some(notes.trim().to_string())),
+        Ok(_) | Err(_) => Ok(None),
+    }
+}
+
 pub fn install_update(profile: &Profile, version: &str) -> Result<String, String> {
     if profile.dev {
         return Err("Updates are disabled for yanklog dev builds.".to_string());
     }
 
     let version = sanitize_version(version)?;
-    let installer_url = match profile.platform {
-        Platform::Linux => env::var("YANKLOG_INSTALLER_URL")
-            .unwrap_or_else(|_| DEFAULT_LINUX_INSTALL_SCRIPT_URL.to_string()),
-        Platform::MacOS => env::var("YANKLOG_MACOS_INSTALLER_URL")
-            .unwrap_or_else(|_| DEFAULT_MACOS_INSTALL_SCRIPT_URL.to_string()),
+    let script = match profile.platform {
+        Platform::Linux => BUNDLED_LINUX_INSTALL_SCRIPT.to_string(),
+        Platform::MacOS => {
+            let installer_url = env::var("YANKLOG_MACOS_INSTALLER_URL")
+                .unwrap_or_else(|_| DEFAULT_MACOS_INSTALL_SCRIPT_URL.to_string());
+            download_text(&installer_url)?
+        }
     };
-    let script = download_text(&installer_url)?;
     let install_dir = detect_install_dir(profile.platform);
 
     let mut command = Command::new("sh");

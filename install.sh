@@ -304,13 +304,29 @@ fi
 
 mkdir -p "$INSTALL_DIR"
 TARGET_BIN="${INSTALL_DIR}/${APP_NAME}"
+PREVIOUS_BIN="${TMP_DIR}/${APP_NAME}.previous"
+
+if [ -f "$TARGET_BIN" ]; then
+    cp -p "$TARGET_BIN" "$PREVIOUS_BIN" || die "Could not preserve the previous YankLog installation"
+fi
 
 log "Installing AppImage..."
-if have_cmd install; then
-    install -m 0755 "$ARTIFACT_PATH" "$TARGET_BIN"
+if have_cmd install && install -m 0755 "$ARTIFACT_PATH" "$TARGET_BIN"; then
+    :
+elif cp "$ARTIFACT_PATH" "$TARGET_BIN" && chmod 0755 "$TARGET_BIN"; then
+    :
 else
-    cp "$ARTIFACT_PATH" "$TARGET_BIN"
-    chmod 0755 "$TARGET_BIN"
+    if [ -f "$PREVIOUS_BIN" ]; then
+        cp -p "$PREVIOUS_BIN" "$TARGET_BIN" || true
+    fi
+    die "Could not install the downloaded AppImage"
+fi
+
+if ! "$TARGET_BIN" --version >/dev/null 2>&1; then
+    if [ -f "$PREVIOUS_BIN" ]; then
+        cp -p "$PREVIOUS_BIN" "$TARGET_BIN" || die "The update failed and the previous installation could not be restored"
+    fi
+    die "The updated AppImage failed its launch check; the previous installation was restored"
 fi
 
 if [ "$SKIP_DESKTOP" -eq 0 ]; then

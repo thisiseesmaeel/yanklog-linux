@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.yanklog.YankLog</id>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <name>YankLog</name>
+  <summary>Private, searchable clipboard history</summary>
+  <description>
+    <p>
+      YankLog keeps copied text searchable without sending clipboard content off your
+      device. Clipboard history is stored in a local encrypted database and can be
+      paused or filtered whenever needed.
+    </p>
+    <p>
+      Search the complete history, pin useful clips, undo accidental deletions, and
+      open the keyboard-focused Quick Pick window from a desktop shortcut. Retention
+      limits and privacy filters control what is captured and how long it is kept.
+    </p>
+    <p>
+      Password-encrypted backups can move selected items or the complete history
+      between YankLog installations.
+    </p>
+  </description>
+  <launchable type="desktop-id">com.yanklog.YankLog.desktop</launchable>
+  <provides>
+    <binary>yanklog</binary>
+  </provides>
+  <url type="homepage">https://yanklog.com</url>
+  <url type="bugtracker">https://github.com/thisiseesmaeel/yanklog-linux/issues</url>
+  <url type="vcs-browser">https://github.com/thisiseesmaeel/yanklog-linux</url>
+  <developer id="com.yanklog">
+    <name>Ismail Safwat</name>
+  </developer>
+  <categories>
+    <category>Utility</category>
+  </categories>
+  <keywords>
+    <keyword>clipboard</keyword>
+    <keyword>history</keyword>
+    <keyword>copy</keyword>
+    <keyword>paste</keyword>
+  </keywords>
+  <screenshots>
+    <screenshot type="default">
+      <image>https://raw.githubusercontent.com/thisiseesmaeel/yanklog-linux/master/packaging/flatpak/screenshots/main.png</image>
+      <caption>Search and manage encrypted clipboard history</caption>
+    </screenshot>
+  </screenshots>
+  <releases>
+    <release version="1.3.0" date="2026-07-29">
+      <description>
+        <p>Faster complete-history search, encrypted backups, safer deletion, timed pauses, improved Quick Pick, onboarding, and refreshed settings.</p>
+      </description>
+    </release>
+    <release version="1.2.0" date="2026-06-28" />
+  </releases>
+  <content_rating type="oars-1.1" />
+</component>

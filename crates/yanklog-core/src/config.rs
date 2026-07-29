@@ -111,6 +111,8 @@ pub struct Config {
     #[serde(default)]
     pub launch_at_startup: bool,
     #[serde(default)]
+    pub skipped_update_version: Option<String>,
+    #[serde(default)]
     pub keybindings: Keybindings,
     #[serde(default)]
     pub retention: Retention,
@@ -129,6 +131,7 @@ impl Default for Config {
             window_width: default_window_width(),
             window_height: default_window_height(),
             launch_at_startup: false,
+            skipped_update_version: None,
             keybindings: Keybindings::default(),
             retention: Retention::default(),
             privacy: Privacy::default(),
@@ -225,6 +228,7 @@ struct LinuxAppConfig<'a> {
     max_history_size: usize,
     max_preview_length: usize,
     launch_at_startup: bool,
+    skipped_update_version: &'a Option<String>,
     keybindings: LinuxAppKeybindings,
     retention: &'a Retention,
     privacy: &'a Privacy,
@@ -242,6 +246,7 @@ fn linux_app_toml(config: &Config) -> Result<String, toml::ser::Error> {
         max_history_size: config.max_history_size,
         max_preview_length: config.max_preview_length,
         launch_at_startup: config.launch_at_startup,
+        skipped_update_version: &config.skipped_update_version,
         keybindings: LinuxAppKeybindings {
             quick_pick_items: config.keybindings.quick_pick_items,
             quick_pick_opacity: config.keybindings.quick_pick_opacity,
