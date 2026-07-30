@@ -2,7 +2,7 @@
 
 Open-source Linux app and shared Rust core for yanklog.
 
-YankLog 1.3 includes complete-history paging, a redesigned keyboard-first Quick Pick,
+YankLog 2.0 includes complete-history paging, a redesigned keyboard-first Quick Pick,
 password-encrypted backups, Secret Service key protection, sensitive-value filters,
 timed pauses, safer clearing with keep-pinned support, deletion undo, onboarding,
 automatic settings saving, and native tray integration.
@@ -34,4 +34,13 @@ On Ubuntu or another supported Linux desktop:
 ```sh
 sudo apt install build-essential pkg-config libgtk-4-dev libadwaita-1-dev libdbus-1-dev
 cargo run -p yanklog-linux-native
+```
+
+## Release 2.0.0
+
+git add -A
+git commit -m "Release YankLog 2.0.0"
+git tag -a v2.0.0 -m "YankLog 2.0.0"
+
+git push origin master v2.0.0
 ```

@@ -47,6 +47,11 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="2.0.0" date="2026-07-30">
+      <description>
+        <p>Native Wayland clipboard support, refreshed Flatpak packaging, and Flathub submission metadata.</p>
+      </description>
+    </release>
     <release version="1.3.1" date="2026-07-29">
       <description>
         <p>Faster complete-history search, encrypted backups, safer deletion, timed pauses, improved Quick Pick, onboarding, and refreshed settings.</p>
