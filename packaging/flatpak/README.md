@@ -51,20 +51,106 @@ rm flatpak-cargo-generator.py
 
 ## Flathub Submission Source
 
-After the release is committed, pushed, and tagged, copy the manifest and generated
-sources into a clean directory named after the Flatpak ID. Replace the main source with:
+Use the two files in [`../flathub/`](../flathub/) for a Flathub submission:
 
-```yaml
-sources:
-  - type: git
-    url: https://github.com/thisiseesmaeel/yanklog-linux.git
-    tag: v1.3.1
-    commit: 5245069b6070bebec12d3bf8e5beeafe954e6221
-    x-checker-data:
-      type: git
-      tag-pattern: ^v([\d.]+)$
-  - generated-sources.json
+```text
+com.yanklog.YankLog.yml
+generated-sources.json
 ```
+
+After the public release is committed, pushed, and tagged, update the Flathub manifest
+to the immutable release source. For example, after creating `v2.0.0`:
+
+```sh
+git rev-list -n 1 v2.0.0
+```
+
+Set `tag` to `v2.0.0` and `commit` to the printed commit in
+`../flathub/com.yanklog.YankLog.yml`. Regenerate and copy
+`generated-sources.json` whenever `Cargo.lock` changes.
+
+## Submit A New App To Flathub
+
+This is a separate submission repository. Do not clone it inside
+`yanklog-linux-public` and do not add it as a submodule.
+
+1. Finish and publish the upstream release first. The source used by Flathub must be
+   an immutable public tag, not `master` or an uncommitted local checkout:
+
+   ```sh
+   cd /path/to/yanklog-linux-public
+   git status --short
+   git tag -a v2.0.0 -m "YankLog 2.0.0"
+   git push origin master v2.0.0
+   git rev-list -n 1 v2.0.0
+   ```
+
+   Copy the last command's output. It is the exact commit that the Flathub manifest
+   must use.
+
+2. Build and test the upstream Flatpak manifest locally. Also regenerate
+   `packaging/flatpak/generated-sources.json` if `Cargo.lock` changed.
+
+3. In GitHub, fork [`flathub/flathub`](https://github.com/flathub/flathub). The fork
+   may contain only `master`; the next step explicitly creates the required `new-pr`
+   branch in it.
+
+4. Create a checkout beside the Linux repository from Flathub's upstream `new-pr`
+   branch, then push that branch to your fork and create the submission branch:
+
+   ```sh
+   cd /path/to/parent-directory
+   git clone --branch=new-pr https://github.com/flathub/flathub.git flathub
+   cd flathub
+   git remote rename origin upstream
+   git remote add origin git@github.com:<your-github-user>/flathub.git
+   git push -u origin new-pr
+   git checkout -b add-com.yanklog.YankLog new-pr
+   ```
+
+   The directory layout should now be:
+
+   ```text
+   parent-directory/
+   ├── yanklog-linux-public/
+   └── flathub/
+   ```
+
+5. Copy the two prepared submission files into the root of the `flathub` checkout:
+
+   ```sh
+   cp ../yanklog-linux-public/packaging/flathub/com.yanklog.YankLog.yml .
+   cp ../yanklog-linux-public/packaging/flathub/generated-sources.json .
+   ```
+
+6. Edit `com.yanklog.YankLog.yml`. Under `sources`, replace the existing `tag` and
+   `commit` together with the release values from step 1:
+
+   ```yaml
+   tag: v2.0.0
+   commit: <exact output from git rev-list -n 1 v2.0.0>
+   ```
+
+   Do not use `master`, a branch name, or a commit from before the `v2.0.0` tag.
+
+7. Check that `git status --short` lists only the two submission files as new changes
+   (apart from files already tracked by Flathub's `new-pr` template), then commit and
+   push:
+
+   ```sh
+   git status --short
+   git add com.yanklog.YankLog.yml generated-sources.json
+   git commit -m "Add com.yanklog.YankLog"
+   git push origin add-com.yanklog.YankLog
+   ```
+
+8. Open the pull request in GitHub's web interface. Set its base branch to `new-pr`,
+   not `master`, and use the title `Add com.yanklog.YankLog`. Address reviewer
+   comments in the same branch. When everything is resolved, request a test build by
+   commenting `bot, build` on the pull request.
 
 Only the manifest and generated dependency manifest belong in the Flathub submission
 repository. Metadata, desktop files, icons, source code, and binaries remain upstream.
+
+Before submitting, make sure the application and submission comply with Flathub's
+current requirements, including its generative-AI policy.

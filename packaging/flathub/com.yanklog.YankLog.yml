@@ -34,8 +34,8 @@ modules:
     sources:
       - type: git
         url: https://github.com/thisiseesmaeel/yanklog-linux.git
-        tag: v1.3.1
-        commit: 5245069b6070bebec12d3bf8e5beeafe954e6221
+        tag: v2.0.0
+        commit: c4fe7ad6391673eb0636975e003a0018cb80c4e1
         x-checker-data:
           type: git
           tag-pattern: ^v([\d.]+)$

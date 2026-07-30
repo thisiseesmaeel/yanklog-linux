@@ -542,7 +542,7 @@ fn build_main_window(app: &adw::Application, present_window: bool) {
         previous_button: previous_button.clone(),
         next_button: next_button.clone(),
         page_offset: Rc::new(Cell::new(0)),
-        search_debounce: Rc::new(RefCell::new(None)),
+        search_debounce: Rc::new(Cell::new(0_u64)),
         last_deleted: Rc::new(RefCell::new(None)),
         undo_button: undo_button.clone(),
     });
@@ -553,12 +553,15 @@ fn build_main_window(app: &adw::Application, present_window: bool) {
         let search_entry = state.search_entry.clone();
         search_entry.connect_search_changed(move |entry| {
             state.page_offset.set(0);
-            if let Some(source) = state.search_debounce.borrow_mut().take() {
-                source.remove();
-            }
+            let generation = state.search_debounce.get().wrapping_add(1);
+            state.search_debounce.set(generation);
             let query = entry.text().to_string();
             let delayed_state = state.clone_for_callbacks();
-            let source = glib::timeout_add_local_once(Duration::from_millis(220), move || {
+            let debounce = Rc::clone(&state.search_debounce);
+            glib::timeout_add_local_once(Duration::from_millis(220), move || {
+                if debounce.get() != generation {
+                    return;
+                }
                 refresh_entries(
                     &delayed_state,
                     if query.trim().is_empty() {
@@ -568,7 +571,6 @@ fn build_main_window(app: &adw::Application, present_window: bool) {
                     },
                 );
             });
-            state.search_debounce.replace(Some(source));
         });
     }
 
@@ -1696,7 +1698,7 @@ struct AppState {
     previous_button: gtk::Button,
     next_button: gtk::Button,
     page_offset: Rc<Cell<usize>>,
-    search_debounce: Rc<RefCell<Option<glib::SourceId>>>,
+    search_debounce: Rc<Cell<u64>>,
     last_deleted: Rc<RefCell<Option<yanklog_core::ClipboardEntry>>>,
     undo_button: gtk::Button,
 }
@@ -2251,22 +2253,24 @@ fn show_quick_picker_window(app: &adw::Application) {
         let database = Rc::clone(&database);
         let config = Rc::clone(&config);
         let entries = Rc::clone(&entries);
-        let debounce = Rc::new(RefCell::new(None::<glib::SourceId>));
+        let debounce = Rc::new(Cell::new(0_u64));
         search_entry.connect_search_changed(move |entry| {
-            if let Some(source) = debounce.borrow_mut().take() {
-                source.remove();
-            }
+            let generation = debounce.get().wrapping_add(1);
+            debounce.set(generation);
             let query = entry.text().to_string();
             let list = list.clone();
             let scroller = scroller.clone();
             let database = Rc::clone(&database);
             let config = Rc::clone(&config);
             let entries = Rc::clone(&entries);
-            let source = glib::timeout_add_local_once(Duration::from_millis(160), move || {
+            let delayed_debounce = Rc::clone(&debounce);
+            glib::timeout_add_local_once(Duration::from_millis(160), move || {
+                if delayed_debounce.get() != generation {
+                    return;
+                }
                 populate_quick_picker_rows(&list, &database, &config, &entries, &query);
                 set_quick_picker_selection(&list, &scroller, 0);
             });
-            debounce.replace(Some(source));
         });
     }
 
