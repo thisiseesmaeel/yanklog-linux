@@ -24,16 +24,10 @@ impl Default for Keybindings {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Retention {
     #[serde(default)]
     pub max_age_days: u32,
-}
-
-impl Default for Retention {
-    fn default() -> Self {
-        Self { max_age_days: 0 }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,18 +56,13 @@ impl Default for Privacy {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ThemePreference {
+    #[default]
     System,
     Light,
     Dark,
-}
-
-impl Default for ThemePreference {
-    fn default() -> Self {
-        Self::System
-    }
 }
 
 impl ThemePreference {
@@ -215,7 +204,7 @@ impl Config {
 
     pub fn set_ignored_patterns_text(&mut self, patterns: &str) {
         self.privacy.ignored_patterns = patterns
-            .split(|c| c == ',' || c == '\n')
+            .split([',', '\n'])
             .map(str::trim)
             .filter(|pattern| !pattern.is_empty())
             .map(ToString::to_string)

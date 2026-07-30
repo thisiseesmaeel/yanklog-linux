@@ -10,12 +10,13 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime};
 use yanklog_core::{
-    check_for_update, copy_to_clipboard, install_profile_update, update_release_notes,
+    check_for_update, copy_to_clipboard, install_profile_update, profile_release_notes,
     ClipboardMonitor, Config, Database, Platform, Profile, ThemePreference,
 };
 
 const DIRECT_APP_ID: &str = "com.yanklog.app";
 const FLATPAK_APP_ID: &str = "com.yanklog.YankLog";
+const BUNDLED_LINUX_INSTALL_SCRIPT: &str = include_str!("../../../install.sh");
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const QUICK_PICKER_WIDTH: i32 = 560;
 const QUICK_PICKER_HEIGHT: i32 = 420;
@@ -378,7 +379,7 @@ fn run_cli_update() {
     };
 
     println!("Installing yanklog {latest_version}...");
-    match install_profile_update(&profile, &latest_version) {
+    match install_profile_update(&profile, &latest_version, BUNDLED_LINUX_INSTALL_SCRIPT) {
         Ok(output) => {
             if !output.trim().is_empty() {
                 println!("{}", output.trim());
@@ -1114,7 +1115,7 @@ fn show_update_status_window(app: &adw::Application) {
         } else {
             match check_for_update(&update_profile, APP_VERSION) {
                 Ok(Some(version)) => {
-                    let notes = update_release_notes(&update_profile, &version).unwrap_or(None);
+                    let notes = profile_release_notes(&update_profile, &version).unwrap_or(None);
                     UpdateStatusResult::Available(version, notes)
                 }
                 Ok(None) => UpdateStatusResult::Current,
@@ -1163,7 +1164,11 @@ fn show_update_status_window(app: &adw::Application) {
                         let version = install_version.clone();
                         let (sender, receiver) = mpsc::channel();
                         thread::spawn(move || {
-                            let result = install_profile_update(&profile, &version);
+                            let result = install_profile_update(
+                                &profile,
+                                &version,
+                                BUNDLED_LINUX_INSTALL_SCRIPT,
+                            );
                             let _ = sender.send(result);
                         });
 

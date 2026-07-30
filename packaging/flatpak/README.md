@@ -21,13 +21,15 @@ flatpak install --user flathub org.gnome.Platform//50 org.gnome.Sdk//50 org.free
 ```
 
 The upstream manifest builds from this checkout and uses `generated-sources.json` for
-offline Cargo dependencies. Flathub's submission copy must replace the `dir` source
-with the public release tag and its exact commit.
+offline Cargo dependencies. The corresponding Flathub submission copy is in
+[`../flathub/com.yanklog.YankLog.yml`](../flathub/com.yanklog.YankLog.yml); it replaces
+the `dir` source with the public release tag and its exact commit.
 
 ## Sandbox Permissions
 
-- `--socket=x11` and `--share=ipc` are required because the current clipboard backend
-  uses X11. On Wayland desktops, YankLog runs through XWayland.
+- `--socket=wayland` enables the native Wayland clipboard backend on compositors that
+  expose the data-control protocol; `--socket=x11` remains as the automatic X11/XWayland
+  fallback. `--share=ipc` is required by GTK.
 - `--device=dri` enables accelerated GTK rendering.
 - `org.freedesktop.secrets` stores the encrypted database key in Secret Service.
 - `org.kde.StatusNotifierWatcher` exposes the tray/status-notifier menu.
@@ -56,8 +58,8 @@ sources into a clean directory named after the Flatpak ID. Replace the main sour
 sources:
   - type: git
     url: https://github.com/thisiseesmaeel/yanklog-linux.git
-    tag: v1.3.0
-    commit: <exact-tag-commit>
+    tag: v1.3.1
+    commit: 5245069b6070bebec12d3bf8e5beeafe954e6221
     x-checker-data:
       type: git
       tag-pattern: ^v([\d.]+)$

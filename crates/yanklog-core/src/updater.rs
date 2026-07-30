@@ -6,8 +6,6 @@ use std::process::{Command, Stdio};
 use crate::profile::{Platform, Profile};
 
 const DEFAULT_DOWNLOADS_ROOT_URL: &str = "https://downloads.yanklog.com";
-const DEFAULT_MACOS_INSTALL_SCRIPT_URL: &str = "https://downloads.yanklog.com/install-macos.sh";
-const BUNDLED_LINUX_INSTALL_SCRIPT: &str = include_str!("../../../install.sh");
 
 pub fn check_for_update(
     profile: &Profile,
@@ -49,20 +47,19 @@ pub fn release_notes(profile: &Profile, version: &str) -> Result<Option<String>,
     }
 }
 
-pub fn install_update(profile: &Profile, version: &str) -> Result<String, String> {
+pub fn install_update(
+    profile: &Profile,
+    version: &str,
+    installer_script: &str,
+) -> Result<String, String> {
     if profile.dev {
         return Err("Updates are disabled for yanklog dev builds.".to_string());
     }
 
     let version = sanitize_version(version)?;
-    let script = match profile.platform {
-        Platform::Linux => BUNDLED_LINUX_INSTALL_SCRIPT.to_string(),
-        Platform::MacOS => {
-            let installer_url = env::var("YANKLOG_MACOS_INSTALLER_URL")
-                .unwrap_or_else(|_| DEFAULT_MACOS_INSTALL_SCRIPT_URL.to_string());
-            download_text(&installer_url)?
-        }
-    };
+    if installer_script.trim().is_empty() {
+        return Err("The bundled installer script was empty.".to_string());
+    }
     let install_dir = detect_install_dir(profile.platform);
 
     let mut command = Command::new("sh");
@@ -96,7 +93,7 @@ pub fn install_update(profile: &Profile, version: &str) -> Result<String, String
         .take()
         .ok_or_else(|| "Failed to open installer stdin".to_string())?;
     stdin
-        .write_all(script.as_bytes())
+        .write_all(installer_script.as_bytes())
         .map_err(|err| format!("Failed to write installer script to stdin: {err}"))?;
     drop(stdin);
 

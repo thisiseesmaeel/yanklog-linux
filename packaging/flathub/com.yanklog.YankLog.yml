@@ -1,3 +1,6 @@
+# Copy this file and packaging/flatpak/generated-sources.json into the
+# com.yanklog.YankLog Flathub submission repository. Update tag and commit together
+# for every release; both must refer to the same public, annotated Git tag.
 app-id: com.yanklog.YankLog
 runtime: org.gnome.Platform
 runtime-version: "50"
@@ -29,6 +32,11 @@ modules:
       - install -Dm644 packaging/flatpak/com.yanklog.YankLog.metainfo.xml /app/share/metainfo/com.yanklog.YankLog.metainfo.xml
       - install -Dm644 LICENSES/MIT.txt /app/share/licenses/com.yanklog.YankLog/MIT.txt
     sources:
-      - type: dir
-        path: ../..
+      - type: git
+        url: https://github.com/thisiseesmaeel/yanklog-linux.git
+        tag: v1.3.1
+        commit: 5245069b6070bebec12d3bf8e5beeafe954e6221
+        x-checker-data:
+          type: git
+          tag-pattern: ^v([\d.]+)$
       - generated-sources.json

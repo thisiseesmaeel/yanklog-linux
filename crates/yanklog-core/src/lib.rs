@@ -13,7 +13,7 @@ pub use database::{ClipboardEntry, Database};
 pub use profile::{Platform, Profile};
 pub use updater::{
     check_for_update, install_update as install_profile_update,
-    release_notes as update_release_notes,
+    release_notes as profile_release_notes,
 };
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
@@ -46,6 +46,12 @@ pub struct ClipboardEntryRecord {
     pub timestamp: String,
     pub relative_timestamp: String,
     pub is_favorite: bool,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct ClipboardPageRecord {
+    pub entries: Vec<ClipboardEntryRecord>,
+    pub total: u64,
 }
 
 impl From<ClipboardEntry> for ClipboardEntryRecord {
@@ -142,6 +148,31 @@ impl YanklogStore {
         }))
     }
 
+    #[uniffi::constructor]
+    pub fn new_with_database_key(
+        platform: String,
+        dev: bool,
+        database_key: String,
+    ) -> Result<Arc<Self>, YanklogError> {
+        if database_key.len() != 64
+            || !database_key
+                .chars()
+                .all(|character| character.is_ascii_hexdigit())
+        {
+            return Err(YanklogError::Message {
+                message: "The database encryption key is invalid.".to_string(),
+            });
+        }
+        let profile = profile_from_parts(&platform, dev)?;
+        let database = Database::open_with_key(profile.clone(), &database_key)?;
+        let config = Config::load(&profile).unwrap_or_default();
+        Ok(Arc::new(Self {
+            profile,
+            database: Arc::new(Mutex::new(database)),
+            monitor: ClipboardMonitor::new(config.poll_interval_ms),
+        }))
+    }
+
     pub fn list_entries(
         &self,
         limit: Option<u64>,
@@ -179,6 +210,35 @@ impl YanklogStore {
             .collect())
     }
 
+    pub fn query_entries(
+        &self,
+        query: String,
+        limit: u64,
+        offset: u64,
+    ) -> Result<ClipboardPageRecord, YanklogError> {
+        let database = self.database.lock().map_err(|_| YanklogError::Message {
+            message: "Database lock was poisoned.".to_string(),
+        })?;
+        let trimmed = query.trim();
+        let entries = if trimmed.is_empty() {
+            database.get_history_page(limit.max(1) as usize, offset as usize)?
+        } else {
+            database.search_history_page(trimmed, limit.max(1) as usize, offset as usize)?
+        };
+        let total = if trimmed.is_empty() {
+            database.count_entries()?
+        } else {
+            database.count_search_history(trimmed)?
+        };
+        Ok(ClipboardPageRecord {
+            entries: entries
+                .into_iter()
+                .map(ClipboardEntryRecord::from)
+                .collect(),
+            total: total as u64,
+        })
+    }
+
     pub fn get_entry(&self, id: i64) -> Result<Option<ClipboardEntryRecord>, YanklogError> {
         Ok(self
             .database
@@ -210,6 +270,23 @@ impl YanklogStore {
         Ok(())
     }
 
+    pub fn restore_entry(&self, entry: ClipboardEntryRecord) -> Result<i64, YanklogError> {
+        let entry = ClipboardEntry {
+            id: entry.id,
+            content: entry.content,
+            content_type: entry.content_type,
+            timestamp: entry.timestamp,
+            is_favorite: entry.is_favorite,
+        };
+        Ok(self
+            .database
+            .lock()
+            .map_err(|_| YanklogError::Message {
+                message: "Database lock was poisoned.".to_string(),
+            })?
+            .restore_entry(&entry)?)
+    }
+
     pub fn clear_history(&self) -> Result<(), YanklogError> {
         self.database
             .lock()
@@ -218,6 +295,116 @@ impl YanklogStore {
             })?
             .clear_history()?;
         Ok(())
+    }
+
+    pub fn clear_unpinned_history(&self) -> Result<u64, YanklogError> {
+        Ok(self
+            .database
+            .lock()
+            .map_err(|_| YanklogError::Message {
+                message: "Database lock was poisoned.".to_string(),
+            })?
+            .clear_unpinned_history()? as u64)
+    }
+
+    pub fn export_encrypted_backup(
+        &self,
+        path: String,
+        password: String,
+    ) -> Result<u64, YanklogError> {
+        let entries = self
+            .database
+            .lock()
+            .map_err(|_| YanklogError::Message {
+                message: "Database lock was poisoned.".to_string(),
+            })?
+            .get_history(None)?;
+        let count = entries.len() as u64;
+        backup::write_encrypted(std::path::Path::new(&path), &password, entries, None)
+            .map_err(|message| YanklogError::Message { message })?;
+        Ok(count)
+    }
+
+    pub fn export_encrypted_backup_options(
+        &self,
+        path: String,
+        password: String,
+        scope: String,
+        selected_ids: Vec<i64>,
+        include_settings: bool,
+    ) -> Result<u64, YanklogError> {
+        let mut entries = self
+            .database
+            .lock()
+            .map_err(|_| YanklogError::Message {
+                message: "Database lock was poisoned.".to_string(),
+            })?
+            .get_history(None)?;
+        match scope.as_str() {
+            "all" => {}
+            "pinned" => entries.retain(|entry| entry.is_favorite),
+            "selected" => {
+                let selected: std::collections::HashSet<i64> = selected_ids.into_iter().collect();
+                entries.retain(|entry| selected.contains(&entry.id));
+            }
+            _ => {
+                return Err(YanklogError::Message {
+                    message: "Unsupported backup scope.".to_string(),
+                })
+            }
+        }
+        if entries.is_empty() {
+            return Err(YanklogError::Message {
+                message: "There are no clipboard items in the selected backup scope.".to_string(),
+            });
+        }
+        let count = entries.len() as u64;
+        let config = include_settings.then(|| Config::load(&self.profile).unwrap_or_default());
+        backup::write_encrypted(std::path::Path::new(&path), &password, entries, config)
+            .map_err(|message| YanklogError::Message { message })?;
+        Ok(count)
+    }
+
+    pub fn import_encrypted_backup(
+        &self,
+        path: String,
+        password: String,
+    ) -> Result<u64, YanklogError> {
+        let backup = backup::read_encrypted(std::path::Path::new(&path), &password)
+            .map_err(|message| YanklogError::Message { message })?;
+        let count = backup.entries.len() as u64;
+        let database = self.database.lock().map_err(|_| YanklogError::Message {
+            message: "Database lock was poisoned.".to_string(),
+        })?;
+        for entry in backup.entries {
+            database.restore_entry(&entry)?;
+        }
+        Ok(count)
+    }
+
+    pub fn import_encrypted_backup_options(
+        &self,
+        path: String,
+        password: String,
+        include_settings: bool,
+    ) -> Result<u64, YanklogError> {
+        let backup = backup::read_encrypted(std::path::Path::new(&path), &password)
+            .map_err(|message| YanklogError::Message { message })?;
+        let count = backup.entries.len() as u64;
+        {
+            let database = self.database.lock().map_err(|_| YanklogError::Message {
+                message: "Database lock was poisoned.".to_string(),
+            })?;
+            for entry in backup.entries {
+                database.restore_entry(&entry)?;
+            }
+        }
+        if include_settings {
+            if let Some(config) = backup.config {
+                config.save(&self.profile)?;
+            }
+        }
+        Ok(count)
     }
 
     pub fn toggle_favorite(&self, id: i64) -> Result<(), YanklogError> {
@@ -263,6 +450,16 @@ impl YanklogStore {
             .count_entries()? as u64)
     }
 
+    pub fn count_unpinned_entries(&self) -> Result<u64, YanklogError> {
+        Ok(self
+            .database
+            .lock()
+            .map_err(|_| YanklogError::Message {
+                message: "Database lock was poisoned.".to_string(),
+            })?
+            .count_unpinned_entries()? as u64)
+    }
+
     pub fn data_dir(&self) -> String {
         self.profile.data_dir().to_string_lossy().to_string()
     }
@@ -283,9 +480,23 @@ pub fn check_update(
 }
 
 #[uniffi::export]
-pub fn install_update(platform: String, version: String) -> Result<String, YanklogError> {
+pub fn install_update(
+    platform: String,
+    version: String,
+    installer_script: String,
+) -> Result<String, YanklogError> {
     let profile = profile_from_parts(&platform, false)?;
-    updater::install_update(&profile, &version).map_err(|message| YanklogError::Message { message })
+    updater::install_update(&profile, &version, &installer_script)
+        .map_err(|message| YanklogError::Message { message })
+}
+
+#[uniffi::export]
+pub fn update_release_notes(
+    platform: String,
+    version: String,
+) -> Result<Option<String>, YanklogError> {
+    let profile = profile_from_parts(&platform, false)?;
+    updater::release_notes(&profile, &version).map_err(|message| YanklogError::Message { message })
 }
 
 fn profile_from_parts(platform: &str, dev: bool) -> Result<Profile, YanklogError> {
