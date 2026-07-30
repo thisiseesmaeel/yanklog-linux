@@ -5,3 +5,13 @@
 *.AppImage.sha256
 **/.DS_Store
 *.log
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+specifications.md
+.flatpak-builder/
+build-dir/
+repo/
