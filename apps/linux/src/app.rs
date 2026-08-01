@@ -1,4 +1,5 @@
 use adw::prelude::*;
+use ashpd::desktop::background::Background;
 use gtk::glib;
 use ksni::blocking::TrayMethods;
 use std::cell::{Cell, RefCell};
@@ -712,7 +713,6 @@ fn maybe_show_onboarding(
     copy_command.set_halign(gtk::Align::Start);
     let launch_at_startup = gtk::CheckButton::with_label("Start YankLog when I sign in");
     launch_at_startup.set_active(config.launch_at_startup);
-    launch_at_startup.set_visible(!is_flatpak_build());
     ready.append(&copy_command);
     ready.append(&launch_at_startup);
 
@@ -778,12 +778,46 @@ fn maybe_show_onboarding(
             let mut next_config = Config::load(&profile).unwrap_or_default();
             next_config.privacy.ignore_secret_like = ignore_secrets.is_active();
             next_config.privacy.ignore_one_time_codes = ignore_codes.is_active();
-            next_config.launch_at_startup = !is_flatpak_build() && launch_at_startup.is_active();
+            next_config.launch_at_startup = launch_at_startup.is_active();
             if !is_flatpak_build() {
                 if let Err(error) = set_launch_at_startup(&profile, next_config.launch_at_startup) {
                     show_status(&status, &error);
                     return;
                 }
+            }
+            if is_flatpak_build() {
+                let status = status.clone();
+                let window = window.clone();
+                let marker = marker.clone();
+                let profile = profile.clone();
+                let state = Rc::clone(&state);
+                let button = button.clone();
+                button.set_sensitive(false);
+                request_flatpak_launch_at_startup(next_config.launch_at_startup, move |result| {
+                    button.set_sensitive(true);
+                    match result {
+                        Ok(enabled) if enabled == next_config.launch_at_startup => {
+                            if let Err(error) = next_config.save_linux_app(&profile) {
+                                show_status(&status, &format!("Could not save settings: {error}"));
+                                return;
+                            }
+                            if let Ok(mut shared) = state.config.lock() {
+                                *shared = next_config;
+                            }
+                            let _ = std::fs::create_dir_all(profile.data_dir());
+                            if let Err(error) = std::fs::write(&marker, "completed\n") {
+                                eprintln!("Could not save onboarding state: {error}");
+                            }
+                            window.close();
+                        }
+                        Ok(_) => show_status(
+                            &status,
+                            "Start at login was not enabled by the desktop portal.",
+                        ),
+                        Err(error) => show_status(&status, &error),
+                    }
+                });
+                return;
             }
             if let Err(error) = next_config.save_linux_app(&profile) {
                 show_status(&status, &format!("Could not save settings: {error}"));
@@ -966,7 +1000,11 @@ fn setup_tray(
         update_available: None,
         pause_state: Arc::clone(&pause_state),
     };
-    let Ok(handle) = tray.assume_sni_available(true).spawn() else {
+    let Ok(handle) = tray
+        .assume_sni_available(true)
+        .disable_dbus_name(is_flatpak_build())
+        .spawn()
+    else {
         return;
     };
     let update_tray_handle = handle.clone();
@@ -1299,6 +1337,50 @@ fn set_launch_at_startup(profile: &Profile, enabled: bool) -> Result<(), String>
     std::fs::write(&desktop_file, content)
         .map_err(|err| format!("Could not write startup entry: {err}"))?;
     Ok(())
+}
+
+fn request_flatpak_launch_at_startup(
+    enabled: bool,
+    on_complete: impl FnOnce(Result<bool, String>) + 'static,
+) {
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let result = async_io::block_on(async move {
+            let request = Background::request()
+                .reason("Start YankLog at login to monitor your clipboard.")
+                .auto_start(enabled)
+                .command(["yanklog", "--background"])
+                .send()
+                .await
+                .map_err(|error| format!("Could not request startup permission: {error}"))?;
+            let response = request
+                .response()
+                .map_err(|error| format!("Startup permission request failed: {error}"))?;
+            Ok(response.auto_start())
+        });
+        let _ = sender.send(result);
+    });
+
+    let mut on_complete = Some(on_complete);
+    glib::timeout_add_local(Duration::from_millis(100), move || {
+        match receiver.try_recv() {
+            Ok(result) => {
+                if let Some(on_complete) = on_complete.take() {
+                    on_complete(result);
+                }
+                glib::ControlFlow::Break
+            }
+            Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                if let Some(on_complete) = on_complete.take() {
+                    on_complete(Err(
+                        "Startup permission request stopped unexpectedly.".to_string()
+                    ));
+                }
+                glib::ControlFlow::Break
+            }
+        }
+    });
 }
 
 fn desktop_exec_quote(path: &Path) -> String {
@@ -2636,7 +2718,6 @@ fn show_preferences_window(app: &adw::Application, profile: &Profile, state: Rc<
     let launch_at_startup = gtk::CheckButton::with_label("Run at startup");
     launch_at_startup.set_active(config.launch_at_startup);
     launch_at_startup.add_css_class("row-preview");
-    launch_at_startup.set_visible(!is_flatpak_build());
     let shortcut_help_button = gtk::Button::with_label("Shortcut setup");
     shortcut_help_button.set_halign(gtk::Align::Start);
 
@@ -2807,12 +2888,50 @@ fn save_preferences(
     next.launch_at_startup = controls.launch_at_startup.is_active();
     next.set_ignored_patterns_text(&controls.ignored_patterns.text());
 
+    if is_flatpak_build() && previous.launch_at_startup != next.launch_at_startup {
+        let launch_at_startup = controls.launch_at_startup.clone();
+        let profile = profile.clone();
+        let shared_config = Arc::clone(shared_config);
+        let status_label = status_label.clone();
+        launch_at_startup.set_sensitive(false);
+        request_flatpak_launch_at_startup(next.launch_at_startup, move |result| {
+            launch_at_startup.set_sensitive(true);
+            match result {
+                Ok(enabled) if enabled == next.launch_at_startup => {
+                    save_preferences_result(next, &profile, &shared_config, &status_label);
+                }
+                Ok(_) => {
+                    launch_at_startup.set_active(previous.launch_at_startup);
+                    show_status(
+                        &status_label,
+                        "Start at login was not enabled by the desktop portal.",
+                    );
+                }
+                Err(error) => {
+                    launch_at_startup.set_active(previous.launch_at_startup);
+                    show_status(&status_label, &error);
+                }
+            }
+        });
+        return;
+    }
+
     if !is_flatpak_build() && previous.launch_at_startup != next.launch_at_startup {
         if let Err(error) = set_launch_at_startup(profile, next.launch_at_startup) {
             show_status(status_label, &error);
             return;
         }
     }
+
+    save_preferences_result(next, profile, shared_config, status_label);
+}
+
+fn save_preferences_result(
+    next: Config,
+    profile: &Profile,
+    shared_config: &Arc<Mutex<Config>>,
+    status_label: &gtk::Label,
+) {
     match next.save_linux_app(profile) {
         Ok(()) => {
             if let Ok(mut config) = shared_config.lock() {

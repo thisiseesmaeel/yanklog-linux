@@ -32,7 +32,11 @@ the `dir` source with the public release tag and its exact commit.
   fallback. `--share=ipc` is required by GTK.
 - `--device=dri` enables accelerated GTK rendering.
 - `org.freedesktop.secrets` stores the encrypted database key in Secret Service.
-- `org.kde.StatusNotifierWatcher` exposes the tray/status-notifier menu.
+- `org.kde.StatusNotifierWatcher` exposes the tray/status-notifier menu. The tray registers
+  under the connection's unique name (`ksni`'s `disable_dbus_name`), because Flatpak's dbus
+  proxy cannot grant ownership of the dynamic `org.kde.StatusNotifierItem-<pid>-<id>` name
+  and Flatpak rejects `--own-name=org.kde.StatusNotifierItem-*` as an invalid D-Bus name.
+- The XDG Background portal handles the user's optional start-at-login approval.
 
 The Flatpak has no network or host-filesystem permission. Backup import and export use
 the GTK file chooser portal. Self-updates and host autostart-file writes are disabled;

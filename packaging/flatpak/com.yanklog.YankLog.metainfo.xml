@@ -47,6 +47,11 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="2.0.2" date="2026-07-30">
+      <description>
+        <p>Flatpak tray integration and portal-based start-at-login support.</p>
+      </description>
+    </release>
     <release version="2.0.0" date="2026-07-30">
       <description>
         <p>Native Wayland clipboard support, refreshed Flatpak packaging, and Flathub submission metadata.</p>

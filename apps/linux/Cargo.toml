@@ -1,6 +1,6 @@
 [package]
 name = "yanklog-linux-native"
-version = "2.0.0"
+version = "2.0.2"
 edition.workspace = true
 license = "MIT"
 publish = false
@@ -19,6 +19,8 @@ yanklog-core = { path = "../../crates/yanklog-core" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 adw = { package = "libadwaita", version = "0.9" }
+ashpd = { version = "0.13.13", default-features = false, features = ["async-io", "background"] }
+async-io = "2.6"
 chrono = "0.4"
 gtk = { package = "gtk4", version = "0.11" }
 ctrlc = "3.5"
