@@ -89,6 +89,13 @@ The script updates Cargo package versions when `--version` differs from the curr
 
 ## R2 Publishing
 
+Authenticate Wrangler with the Cloudflare account that owns the R2 bucket before
+publishing:
+
+```sh
+npx wrangler login
+```
+
 After you have both architecture artifacts, publish them to R2. If you downloaded artifacts from GitHub Actions, pass the ZIP files directly:
 
 ```sh
@@ -103,8 +110,8 @@ Raw local AppImage files are also supported:
 ```sh
 ./publish-web-release.sh \
   --version 2.0.0 \
-  --x86_64 dist/yanklog-2.0.0-linux-x86_64.AppImage \
-  --aarch64 dist/yanklog-2.0.0-linux-aarch64.AppImage
+  --x86_64 dist/appimage/yanklog-2.0.0-linux-x86_64.AppImage \
+  --aarch64 dist/appimage/yanklog-2.0.0-linux-aarch64.AppImage
 ```
 
 Use a non-default bucket only when needed:
@@ -112,15 +119,15 @@ Use a non-default bucket only when needed:
 ```sh
 ./publish-web-release.sh \
   --version 2.0.0 \
-  --x86_64 dist/yanklog-2.0.0-linux-x86_64.AppImage \
-  --aarch64 dist/yanklog-2.0.0-linux-aarch64.AppImage \
+  --x86_64 dist/appimage/yanklog-2.0.0-linux-x86_64.AppImage \
+  --aarch64 dist/appimage/yanklog-2.0.0-linux-aarch64.AppImage \
   --r2-bucket yanklog-downloads
 ```
 
 The publish script:
 
 - accepts either GitHub Actions artifact ZIP files or raw local AppImage files;
-- extracts ZIP inputs and validates that each contains one AppImage and one checksum;
+- extracts ZIP inputs and validates that each contains one AppImage, checksum, and build-info file;
 - uploads the Linux AppImages, checksums, and build info files to `linux/` in Cloudflare R2;
 - writes `linux/latest-version.txt` to Cloudflare R2;
 - writes `install.sh` and `uninstall.sh` to the R2 root;
