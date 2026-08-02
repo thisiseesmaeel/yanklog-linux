@@ -4,6 +4,7 @@ set -eu
 VERSION=""
 X86_64_INPUT=""
 AARCH64_INPUT=""
+RELEASE_NOTES_PATH=""
 R2_BUCKET="${YANKLOG_R2_BUCKET:-yanklog-downloads}"
 R2_PREFIX="linux"
 
@@ -20,6 +21,7 @@ Required:
   --aarch64 <file>         GitHub Actions ZIP or aarch64 AppImage
 
 Options:
+  --release-notes <file>  Plain-text notes shown by the in-app updater
   --r2-bucket <name>       Cloudflare R2 bucket (default: yanklog-downloads)
   -h, --help               Show this help message
 
@@ -203,6 +205,11 @@ while [ "$#" -gt 0 ]; do
             AARCH64_INPUT="$2"
             shift 2
             ;;
+        --release-notes)
+            [ "$#" -ge 2 ] || die "--release-notes requires a file"
+            RELEASE_NOTES_PATH="$2"
+            shift 2
+            ;;
         --r2-bucket)
             [ "$#" -ge 2 ] || die "--r2-bucket requires a value"
             R2_BUCKET="$2"
@@ -225,6 +232,10 @@ case "$VERSION" in
     *[!0-9A-Za-z.+_-]*|.*|-*|*/*|*..*) die "Invalid version: $VERSION" ;;
 esac
 have_cmd npx || die "npx is required (install Node.js and Wrangler first)"
+
+if [ -n "$RELEASE_NOTES_PATH" ]; then
+    RELEASE_NOTES_SRC="$(resolve_file "$RELEASE_NOTES_PATH")" || die "Release notes not found: $RELEASE_NOTES_PATH"
+fi
 
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/yanklog-linux-release.XXXXXX")"
 cleanup() {
@@ -261,17 +272,25 @@ for arch in x86_64 aarch64; do
     r2_put_file "$R2_BUCKET" "${R2_PREFIX}/${artifact_name}.buildinfo" "$buildinfo" "text/plain" "public, max-age=31536000, immutable"
 done
 r2_put_file "$R2_BUCKET" "${R2_PREFIX}/latest-version.txt" "$TMP_DIR/latest-version.txt" "text/plain" "no-cache"
+if [ -n "$RELEASE_NOTES_PATH" ]; then
+    r2_put_file "$R2_BUCKET" "${R2_PREFIX}/release-notes-${VERSION}.txt" "$RELEASE_NOTES_SRC" "text/plain" "public, max-age=31536000, immutable"
+fi
 r2_put_file "$R2_BUCKET" "install.sh" "$SCRIPT_DIR/install.sh" "text/x-shellscript" "no-cache"
 r2_put_file "$R2_BUCKET" "uninstall.sh" "$SCRIPT_DIR/uninstall.sh" "text/x-shellscript" "no-cache"
 
 if [ -n "$PREVIOUS_VERSION" ] && [ "$PREVIOUS_VERSION" != "$VERSION" ]; then
     log "Deleting previous Linux R2 artifacts for $PREVIOUS_VERSION"
     delete_release_artifacts "$PREVIOUS_VERSION" "${R2_PREFIX}/"
+    r2_delete_if_present "$R2_BUCKET" "${R2_PREFIX}/release-notes-${PREVIOUS_VERSION}.txt"
 fi
 
 # Older releases used the R2 root instead of the linux/ prefix.
 delete_release_artifacts "$PREVIOUS_VERSION" ""
 delete_release_artifacts "$VERSION" ""
+if [ -n "$PREVIOUS_VERSION" ]; then
+    r2_delete_if_present "$R2_BUCKET" "release-notes-${PREVIOUS_VERSION}.txt"
+fi
+r2_delete_if_present "$R2_BUCKET" "release-notes-${VERSION}.txt"
 r2_delete_if_present "$R2_BUCKET" "latest-linux-version.txt"
 r2_delete_if_present "$R2_BUCKET" "linux-artifact-base-url.txt"
 
@@ -283,5 +302,8 @@ for arch in x86_64 aarch64; do
     log "  ${R2_PREFIX}/${artifact_name}.buildinfo"
 done
 log "  ${R2_PREFIX}/latest-version.txt"
+if [ -n "$RELEASE_NOTES_PATH" ]; then
+    log "  ${R2_PREFIX}/release-notes-${VERSION}.txt"
+fi
 log "  install.sh"
 log "  uninstall.sh"

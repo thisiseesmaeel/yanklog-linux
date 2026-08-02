@@ -18,6 +18,7 @@ The public installer reads metadata and artifacts from Cloudflare R2:
 - `https://downloads.yanklog.com/install.sh`
 - `https://downloads.yanklog.com/uninstall.sh`
 - `https://downloads.yanklog.com/linux/latest-version.txt`
+- `https://downloads.yanklog.com/linux/release-notes-<version>.txt` (optional)
 - `https://downloads.yanklog.com/linux/yanklog-<version>-linux-<arch>.AppImage`
 - `https://downloads.yanklog.com/linux/yanklog-<version>-linux-<arch>.AppImage.sha256`
 - `https://downloads.yanklog.com/linux/yanklog-<version>-linux-<arch>.AppImage.buildinfo`
@@ -102,7 +103,8 @@ After you have both architecture artifacts, publish them to R2. If you downloade
 ./publish-web-release.sh \
   --version 2.0.0 \
   --x86_64 ~/Downloads/yanklog-appimage-x86_64.zip \
-  --aarch64 ~/Downloads/yanklog-appimage-aarch64.zip
+  --aarch64 ~/Downloads/yanklog-appimage-aarch64.zip \
+  --release-notes release-notes-2.0.0.txt
 ```
 
 Raw local AppImage files are also supported:
@@ -130,6 +132,7 @@ The publish script:
 - extracts ZIP inputs and validates that each contains one AppImage, checksum, and build-info file;
 - uploads the Linux AppImages, checksums, and build info files to `linux/` in Cloudflare R2;
 - writes `linux/latest-version.txt` to Cloudflare R2;
+- uploads optional per-version release notes for the update window and `yanklog --update`;
 - writes `install.sh` and `uninstall.sh` to the R2 root;
 - deletes the previous published Linux version from R2 after the new upload succeeds;
 - removes stale flat Linux objects from older publishing layouts;

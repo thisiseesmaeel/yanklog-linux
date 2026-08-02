@@ -379,6 +379,12 @@ fn run_cli_update() {
         }
     };
 
+    match profile_release_notes(&profile, &latest_version) {
+        Ok(Some(notes)) => println!("Release notes for {latest_version}:\n\n{notes}\n"),
+        Ok(None) => {}
+        Err(err) => eprintln!("Could not load release notes: {err}"),
+    }
+
     println!("Installing yanklog {latest_version}...");
     match install_profile_update(&profile, &latest_version, BUNDLED_LINUX_INSTALL_SCRIPT) {
         Ok(output) => {
