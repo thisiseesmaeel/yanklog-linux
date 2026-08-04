@@ -1,6 +1,7 @@
 name: Build AppImages
 
 on:
+  pull_request:
   workflow_dispatch:
     inputs:
       version:
@@ -8,6 +9,8 @@ on:
         required: false
         type: string
   push:
+    branches:
+      - master
     tags:
       - "v*"
 
@@ -87,15 +90,171 @@ jobs:
             dist/appimage/yanklog-${{ steps.version.outputs.version }}-linux-${{ matrix.arch }}.AppImage.buildinfo
           if-no-files-found: error
 
+  flatpak:
+    name: Build Flatpak (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-50
+      options: --privileged
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v5
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          bundle: yanklog-${{ matrix.arch }}.flatpak
+          manifest-path: packaging/flatpak/com.yanklog.YankLog.yml
+          cache-key: flatpak-builder-${{ matrix.arch }}-${{ github.sha }}
+          arch: ${{ matrix.arch }}
+      - uses: actions/upload-artifact@v6
+        with:
+          name: flatpak-bundle-${{ matrix.arch }}
+          path: yanklog-${{ matrix.arch }}.flatpak
+
+  publish-r2:
+    name: Publish to Cloudflare R2
+    needs: [appimage, flatpak]
+    runs-on: ubuntu-24.04
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-50
+      options: --privileged
+    if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Download AppImage artifacts
+        uses: actions/download-artifact@v7
+        with:
+          pattern: yanklog-appimage-*
+          path: appimage-artifacts
+          merge-multiple: true
+
+      - name: Download Flatpak artifacts
+        uses: actions/download-artifact@v7
+        with:
+          pattern: flatpak-bundle-*
+          path: flatpak-artifacts
+          merge-multiple: true
+
+      - name: Install rclone
+        run: |
+          curl -fsSL https://rclone.org/install.sh | sh
+
+      - name: Publish AppImages and Flatpak to R2
+        shell: bash
+        env:
+          YANKLOG_R2_BUCKET: ${{ vars.YANKLOG_R2_BUCKET }}
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ vars.CF_ACCOUNT_ID }}
+          RCLONE_CONFIG_R2_TYPE: s3
+          RCLONE_CONFIG_R2_PROVIDER: Other
+          RCLONE_CONFIG_R2_S3_PROVIDER: Other
+          RCLONE_CONFIG_R2_ENDPOINT: ${{ vars.YANKLOG_R2_ENDPOINT }}
+          RCLONE_CONFIG_R2_ACCESS_KEY_ID: ${{ secrets.YANKLOG_R2_ACCESS_KEY_ID }}
+          RCLONE_CONFIG_R2_SECRET_ACCESS_KEY: ${{ secrets.YANKLOG_R2_SECRET_ACCESS_KEY }}
+        run: |
+          set -eu
+          
+          # Create flatpak repo from both architecture bundles
+          flatpak init --repo=repo/ --title="YankLog" --no-gpg
+          flatpak build-import-bundle repo/ \
+            flatpak-artifacts/yanklog-x86_64.flatpak \
+            flatpak-artifacts/yanklog-aarch64.flatpak
+
+          # Resolve version
+          version="$(awk -F'"' '/^version = "/ { print $2; exit }' apps/linux/Cargo.toml)"
+          tag_version="${GITHUB_REF_NAME#v}"
+          if [[ -n "${tag_version}" ]]; then version="${tag_version}"; fi
+          echo "Publishing version: $version"
+
+          # Generate user-friendly release notes from git history
+          prev_tag="$(git tag --sort=-v:refname | head -n2 | tail -n1)"
+          repo_url="https://github.com/${GITHUB_REPOSITORY}"
+          notes_file="release-notes-${version}.txt"
+          if [[ -n "${prev_tag}" ]]; then
+            rev_range="${prev_tag}..HEAD"
+          else
+            rev_range="-20"
+          fi
+
+          # Build release notes: try conventional commits first, fall back to plain list
+          {
+            echo "## What's New"
+            echo ""
+
+            # Features
+            feats="$(git log --pretty=format:"%s|||%h" ${rev_range} | grep -E '^feat(\(.*\):|:)' || true)"
+            if [[ -n "${feats}" ]]; then
+              echo "### New Features"
+              echo "${feats}" | while IFS= read -r line; do
+                msg="$(echo "$line" | cut -d'|' -f1)"
+                sha="$(echo "$line" | cut -d'|' -f3)"
+                echo "- ${msg#feat(*} (${sha})"
+              done
+              echo ""
+            fi
+
+            # Bug Fixes
+            fixes="$(git log --pretty=format:"%s|||%h" ${rev_range} | grep -E '^fix(\(.*\):|:)' || true)"
+            if [[ -n "${fixes}" ]]; then
+              echo "### Bug Fixes"
+              echo "${fixes}" | while IFS= read -r line; do
+                msg="$(echo "$line" | cut -d'|' -f1)"
+                sha="$(echo "$line" | cut -d'|' -f3)"
+                echo "- ${msg#fix(*} (${sha})"
+              done
+              echo ""
+            fi
+
+            # Breaking Changes
+            breaking="$(git log --pretty=format:"%s|||%h" ${rev_range} | grep -E '^(BREAKING CHANGE|!:|feat!|fix!)' || true)"
+            if [[ -n "${breaking}" ]]; then
+              echo "### Breaking Changes"
+              echo "${breaking}" | while IFS= read -r line; do
+                msg="$(echo "$line" | cut -d'|' -f1)"
+                sha="$(echo "$line" | cut -d'|' -f3)"
+                echo "- ${msg} (${sha})"
+              done
+              echo ""
+            fi
+
+            # Fallback: show recent commits (filter out release prep noise)
+            # Only used if no conventional commits were found
+            has_content="$(echo -e "${feats}\n${fixes}\n${breaking}")"
+            if [[ -z "${has_content}" ]]; then
+              echo "### Recent Changes"
+              git log --pretty=format:"- %s (%h)" \
+                --grep="^release:" --grep="^update:" --invert-grep \
+                ${rev_range}
+              echo ""
+            fi
+          } > "${notes_file}"
+
+          echo "Generated release notes:"
+          head -15 "${notes_file}"
+
+          # Build publish script args
+          PUBLISH_ARGS="--version $version --x86_64 appimage-artifacts/yanklog-${version}-linux-x86_64.AppImage --aarch64 appimage-artifacts/yanklog-${version}-linux-aarch64.AppImage --flatpak-repo repo/ --release-notes release-notes-${version}.txt"
+
+          ./publish-release.sh $PUBLISH_ARGS
+
   github-release:
     name: GitHub Release
-    needs: appimage
+    needs: [appimage, flatpak]
     if: github.ref_type == 'tag'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
-      - name: Download artifacts
+      - name: Download all artifacts
         uses: actions/download-artifact@v7
         with:
           path: release-artifacts
@@ -110,5 +269,8 @@ jobs:
           if gh release view "$tag" --repo "$GH_REPO" >/dev/null 2>&1; then
             gh release upload "$tag" release-artifacts/* --clobber --repo "$GH_REPO"
           else
-            gh release create "$tag" release-artifacts/* --title "$tag" --notes "Native yanklog Linux AppImage release." --repo "$GH_REPO"
+            gh release create "$tag" release-artifacts/* \
+              --title "$tag" \
+              --generate-notes \
+              --repo "$GH_REPO"
           fi

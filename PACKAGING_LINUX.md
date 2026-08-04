@@ -4,14 +4,19 @@ This file is the release checklist for the native Linux app.
 
 ## What Gets Published
 
-The Linux release artifact is an AppImage per architecture:
+The Linux release artifacts are AppImages per architecture:
 
 - `yanklog-<version>-linux-x86_64.AppImage`
 - `yanklog-<version>-linux-x86_64.AppImage.sha256`
 - `yanklog-<version>-linux-x86_64.AppImage.buildinfo`
 - `yanklog-<version>-linux-aarch64.AppImage`
-- `yanklog-<version>-linux-aarch64.AppImage.sha256`
+- `yanklog-<version>-linux.aarch64.AppImage.sha256`
 - `yanklog-<version>-linux-aarch64.AppImage.buildinfo`
+
+And a Flatpak repository at `linux/flatpak/`:
+
+- `linux/flatpak/repo` — ostree repository objects
+- `linux/flatpak/yanklog.flatpakrepo` — repository descriptor for `flatpak install`
 
 The public installer reads metadata and artifacts from Cloudflare R2:
 
@@ -46,8 +51,8 @@ Manual artifact build:
 5. Click `Run workflow`.
 6. Leave `version` empty to use `apps/linux/Cargo.toml`, or enter a version such as `2.0.0`.
 7. Download both workflow artifacts when the jobs finish:
-   - `yanklog-appimage-x86_64.zip`
-   - `yanklog-appimage-aarch64.zip`
+   - `yanklog-appimage-x86_64.zip` (contains AppImage, checksum, buildinfo)
+   - `yanklog-appimage-aarch64.zip` (contains AppImage, checksum, buildinfo)
 
 GitHub downloads workflow artifacts as ZIP files. The publish script accepts those ZIPs directly and extracts the contained AppImage plus checksum.
 
@@ -58,7 +63,9 @@ git tag v2.0.0
 git push origin v2.0.0
 ```
 
-Pushing a tag that starts with `v` creates a GitHub Release and uploads both AppImages automatically.
+Pushing a tag that starts with `v` builds and publishes both AppImages and a
+self-hosted Flatpak repository to Cloudflare R2, and creates a GitHub Release
+with all release assets.
 
 Normal branch pushes do not build AppImages. The workflow only runs manually or on `v*` tags.
 
@@ -161,8 +168,9 @@ Build provenance is published next to each AppImage as `.buildinfo`. See [REPROD
 ## Flatpak / Flathub
 
 Production Flatpak packaging lives in `packaging/flatpak/` and uses the app ID
-`com.yanklog.YankLog`. The `Build Flatpak` GitHub Actions workflow builds both
-`x86_64` and `aarch64` bundles against the GNOME 50 runtime.
+`com.yanklog.YankLog`. The `Build AppImages` GitHub Actions workflow builds both
+`x86_64` and `aarch64` bundles against the GNOME 50 runtime, alongside the
+AppImage builds.
 
 The app builds without network access, uses generated Cargo source metadata, and
 has no broad host filesystem access. It uses X11 directly and XWayland on Wayland
@@ -201,9 +209,10 @@ with Flathub.
 
 ### Publishing a Self-Hosted Release
 
-The `Build Flatpak` workflow publishes a repository automatically when a tag
-(`v*`) is pushed. It builds both architectures, imports them into a single repo,
-and syncs to R2 using `publish-flatpak-release.sh`.
+The `Build AppImages` workflow publishes both AppImages and a self-hosted
+Flatpak repository to Cloudflare R2 automatically when a tag (`v*`) is pushed.
+It builds both architectures, creates a combined Flatpak repo, and syncs
+everything to R2.
 
 Required GitHub secrets and variables:
 
@@ -211,28 +220,37 @@ Required GitHub secrets and variables:
 - `YANKLOG_R2_ENDPOINT` — R2 S3 endpoint URL (repository variable)
 - `YANKLOG_R2_ACCESS_KEY_ID` — R2 access key (repository secret)
 - `YANKLOG_R2_SECRET_ACCESS_KEY` — R2 secret key (repository secret)
+- `CF_API_TOKEN` — Cloudflare API token with R2 Object Read/Write (repository secret)
+- `CF_ACCOUNT_ID` — Cloudflare account ID (repository variable)
 
-These mirror the AppImage publishing setup. See [R2 Publishing](#r2-publishing)
-for the wrangler authentication steps.
+See [R2 Publishing](#r2-publishing) for wrangler authentication details.
 
 Local publishing:
 
 ```sh
-flatpak build-export repo/ yanklog-x86_64.flatpak
-flatpak build-export repo/ yanklog-aarch64.flatpak
-./publish-flatpak-release.sh --repo-dir repo/ --gpg-key <key-id>
+./publish-release.sh \
+  --version 2.0.0 \
+  --x86_64 dist/appimage/yanklog-2.0.0-linux-x86_64.AppImage \
+  --aarch64 dist/appimage/yanklog-2.0.0-linux-aarch64.AppImage \
+  --flatpak-repo repo/ \
+  --release-notes release-notes-2.0.0.txt
 ```
 
-The script signs the repository (if `--gpg-key` is provided), prunes old refs,
-generates static deltas, and uploads to R2 with appropriate cache headers:
+The `publish-release.sh` script is a wrapper that calls both publishers:
+
+- `publish-web-release.sh` — uploads AppImages, checksums, buildinfo,
+  install.sh, uninstall.sh, release notes to R2 (via wrangler);
+- `publish-flatpak-release.sh` — syncs the flatpak repo to R2 (via rclone);
+- generates and uploads the `yanklog.flatpakrepo` descriptor.
+
+`publish-flatpak-release.sh` (when called directly) signs the repository
+(if `--gpg-key` is provided), prunes old refs, generates static deltas,
+and uploads to R2 with appropriate cache headers:
 
 - `objects/` — 1 year cache (immutable OSTree objects)
 - `deltas/` — 1 day cache (static deltas)
 - `refs/` — 1 minute cache (branch refs)
 - `summary` / `summary.sig` — no-cache (always fresh, uploaded last for atomicity)
-
-For GPG signing in CI, add a `FLATPAK_GPG_KEY_ID` repository secret and pass
-`--gpg-key` to the script in the workflow.
 
 ## Linux Compatibility
 

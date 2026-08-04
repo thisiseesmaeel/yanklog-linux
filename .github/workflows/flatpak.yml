@@ -35,61 +35,7 @@ jobs:
           manifest-path: packaging/flatpak/com.yanklog.YankLog.yml
           cache-key: flatpak-builder-${{ matrix.arch }}-${{ github.sha }}
           arch: ${{ matrix.arch }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: flatpak-bundle-${{ matrix.arch }}
           path: yanklog-${{ matrix.arch }}.flatpak
-
-  publish:
-    name: Publish Flatpak Repository
-    needs: build
-    runs-on: ubuntu-24.04
-    container:
-      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-50
-      options: --privileged
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Download bundles
-        uses: actions/download-artifact@v4
-        with:
-          pattern: flatpak-bundle-*
-          merge-multiple: false
-
-      - name: Install rclone
-        run: |
-          curl -fsSL https://rclone.org/install.sh | sh
-
-      - name: Import bundles and publish
-        env:
-          YANKLOG_R2_BUCKET: ${{ vars.YANKLOG_R2_BUCKET }}
-          RCLONE_CONFIG_R2_TYPE: s3
-          RCLONE_CONFIG_R2_PROVIDER: Other
-          RCLONE_CONFIG_R2_S3_PROVIDER: Other
-          RCLONE_CONFIG_R2_ENDPOINT: ${{ vars.YANKLOG_R2_ENDPOINT }}
-          RCLONE_CONFIG_R2_ACCESS_KEY_ID: ${{ secrets.YANKLOG_R2_ACCESS_KEY_ID }}
-          RCLONE_CONFIG_R2_SECRET_ACCESS_KEY: ${{ secrets.YANKLOG_R2_SECRET_ACCESS_KEY }}
-        run: |
-          # Create an empty repo and import both architecture bundles
-          flatpak init --repo=repo/ --title="YankLog" --no-gpg
-          flatpak build-import-bundle repo/ \
-            flatpak-bundle-x86_64/yanklog-x86_64.flatpak \
-            flatpak-bundle-aarch64/yanklog-aarch64.flatpak
-
-          # Publish (handles pruning, deltas, signing, and R2 sync)
-          # To enable GPG signing, set the GPG_KEY env var and pass --gpg-key to the script
-          ./publish-flatpak-release.sh --repo-dir repo/
-
-          # Generate and upload the .flatpakrepo descriptor for clients
-          cat > /tmp/yanklog.flatpakrepo << 'EOF'
-          [Flatpak Remote]
-          Name=yanklog
-          Url=https://downloads.yanklog.com/linux/flatpak
-          EOF
-
-          rclone copyto /tmp/yanklog.flatpakrepo \
-            "r2:${YANKLOG_R2_BUCKET}/linux/flatpak/yanklog.flatpakrepo" \
-            --cache-control "public,max-age=3600"
