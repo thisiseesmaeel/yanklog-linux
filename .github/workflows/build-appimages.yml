@@ -124,7 +124,7 @@ jobs:
     container:
       image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-50
       options: --privileged
-    if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     permissions:
       contents: read
     steps:
@@ -146,6 +146,7 @@ jobs:
 
       - name: Install rclone
         run: |
+          mkdir -p /var/cache/man
           curl -fsSL https://rclone.org/install.sh | sh
 
       - name: Publish AppImages and Flatpak to R2
@@ -249,7 +250,7 @@ jobs:
   github-release:
     name: GitHub Release
     needs: [appimage, flatpak]
-    if: github.ref_type == 'tag'
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
     permissions:
       contents: write
