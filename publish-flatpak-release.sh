@@ -36,7 +36,7 @@ Options:
   -h, --help               Show this help message
 
 The repository should be created using:
-  flatpak build-import-bundle <repo-dir> *.flatpak
+  flatpak build-import-bundle <repo-dir> <bundle>  # one bundle per call
 
 (Or: flatpak build-export <repo-dir> <app-id>)
 
