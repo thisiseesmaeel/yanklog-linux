@@ -165,7 +165,7 @@ jobs:
           set -eu
           
           # Create flatpak repo from both architecture bundles
-          flatpak init --repo=repo/ --title="YankLog" --no-gpg
+          # build-import-bundle creates the repo if it doesn't exist
           flatpak build-import-bundle repo/ \
             flatpak-artifacts/yanklog-x86_64.flatpak \
             flatpak-artifacts/yanklog-aarch64.flatpak
