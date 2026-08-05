@@ -35,21 +35,28 @@ jobs:
     steps:
       - name: Install system dependencies
         run: |
-          apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            build-essential \
-            ca-certificates \
-            curl \
-            desktop-file-utils \
-            file \
-            fuse \
-            git \
-            libadwaita-1-dev \
-            libayatana-appindicator3-dev \
-            libgtk-4-dev \
-            librsvg2-bin \
-            patchelf \
-            pkg-config
+          apt-get clean && apt-get update -o Acquire::Retries=3
+          # Retry package installation to handle transient mirror 404s
+          for i in 1 2 3; do
+            if DEBIAN_FRONTEND=noninteractive apt-get install -y \
+              build-essential \
+              ca-certificates \
+              curl \
+              desktop-file-utils \
+              file \
+              fuse \
+              git \
+              libadwaita-1-dev \
+              libayatana-appindicator3-dev \
+              libgtk-4-dev \
+              librsvg2-bin \
+              patchelf \
+              pkg-config; then
+              break
+            fi
+            echo "apt-get install failed (attempt $i), retrying..."
+            sleep 5
+          done
           apt-get install -y libfuse2 || apt-get install -y libfuse2t64 || true
           ldd --version | head -n 1
 
