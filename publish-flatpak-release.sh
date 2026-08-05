@@ -36,9 +36,10 @@ Options:
   -h, --help               Show this help message
 
 The repository should be created using:
-  flatpak build-import-bundle <repo-dir> <bundle>  # one bundle per call
+  flatpak build-repo <repo-dir>
+  flatpak build-import-bundle <repo-dir> *.flatpak  # one bundle per call
 
-(Or: flatpak build-export <repo-dir> <app-id>)
+Or: flatpak build-export <repo-dir> <app-id>
 
 Before running, configure rclone for R2 (or pass config via env vars):
   rclone config create r2 s3 \\
