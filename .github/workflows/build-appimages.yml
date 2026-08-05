@@ -165,8 +165,8 @@ jobs:
           set -eu
           
           # Create flatpak repo from both architecture bundles
-          # build-import-bundle creates the repo if it doesn't exist
-          # Run twice since only one bundle is accepted per invocation
+          # Clean any stale repo and initialize fresh
+          rm -rf repo/
           flatpak build-import-bundle repo/ flatpak-artifacts/yanklog-x86_64.flatpak
           flatpak build-import-bundle repo/ flatpak-artifacts/yanklog-aarch64.flatpak
 
