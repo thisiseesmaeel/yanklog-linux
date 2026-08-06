@@ -253,7 +253,7 @@ jobs:
           # Build publish script args
           PUBLISH_ARGS="--version $version --x86_64 appimage-artifacts/yanklog-${version}-linux-x86_64.AppImage --aarch64 appimage-artifacts/yanklog-${version}-linux-aarch64.AppImage --flatpak-repo repo/ --release-notes release-notes-${version}.txt"
 
-          ./publish-release.sh $PUBLISH_ARGS
+          sh ./publish-release.sh $PUBLISH_ARGS
 
   github-release:
     name: GitHub Release
