@@ -160,8 +160,8 @@ jobs:
         shell: bash
         env:
           YANKLOG_R2_BUCKET: ${{ vars.YANKLOG_R2_BUCKET }}
-          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
-          CF_ACCOUNT_ID: ${{ vars.CF_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CF_ACCOUNT_ID }}
           RCLONE_CONFIG_R2_TYPE: s3
           RCLONE_CONFIG_R2_PROVIDER: Other
           RCLONE_CONFIG_R2_S3_PROVIDER: Other
