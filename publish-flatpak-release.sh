@@ -182,8 +182,8 @@ if [ -n "$GPG_KEY" ]; then
 fi
 
 if [ "$PRUNE_DAYS" -gt 0 ]; then
-    log "Pruning references older than ${PRUNE_DAYS} days..."
-    flatpak build-update-repo --prune --prune-from-days "$PRUNE_DAYS" "$REPO_DIR"
+    log "Pruning old refs..."
+    flatpak build-update-repo --prune "$REPO_DIR"
 fi
 
 if [ "$GENERATE_DELTAS" -eq 1 ]; then
