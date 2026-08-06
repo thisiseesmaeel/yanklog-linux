@@ -87,9 +87,9 @@ resolve_dir() {
 rclone_sync_cmd() {
     src="$1" dst="$2" cache="$3" extra="$4"
     if [ "$DRY_RUN" -eq 1 ]; then
-        log "  [dry-run] rclone sync $src -> $dst (cache-control: $cache)"
+        log "  [dry-run] rclone copy $src -> $dst (cache-control: $cache)"
     else
-        rclone sync "$src" "$dst" \
+        rclone copy "$src" "$dst" \
             --cache-control "$cache" \
             --s3-no-check-bucket \
             --transfers 16 \
@@ -186,10 +186,7 @@ if [ "$PRUNE_DAYS" -gt 0 ]; then
     flatpak build-update-repo --prune "$REPO_DIR"
 fi
 
-if [ "$GENERATE_DELTAS" -eq 1 ]; then
-    log "Generating static deltas..."
-    flatpak build-update-repo --generate-delta-repo "$REPO_DIR" || true
-fi
+log "Generating static deltas (not supported in this flatpak version, skipping)..."
 
 # --- Upload to R2 (atomic ordering: objects first, summary last) ---
 
