@@ -57,13 +57,7 @@ In CI, rclone auto-discovers the "r2" remote from:
   RCLONE_CONFIG_R2_ACCESS_KEY_ID=...
   RCLONE_CONFIG_R2_SECRET_ACCESS_KEY=...
 
-Cache headers applied:
-  objects/    -> public, max-age=31536000, immutable  (1 year)
-  deltas/     -> public, max-age=86400                (1 day)
-  refs/       -> public, max-age=60                   (1 minute)
-  config      -> public, max-age=60                   (1 minute)
-  summary     -> no-cache                              (always fresh)
-  summary.sig -> no-cache                              (always fresh)
+Cache headers: not set (rclone copy does not support --cache-control in this version)
 
 Upload order is atomic: objects and deltas are uploaded first,
 then summary/summary.sig are written last so clients never see
@@ -85,12 +79,11 @@ resolve_dir() {
 }
 
 rclone_sync_cmd() {
-    src="$1" dst="$2" cache="$3" extra="$4"
+    src="$1" dst="$2" extra="$3"
     if [ "$DRY_RUN" -eq 1 ]; then
-        log "  [dry-run] rclone copy $src -> $dst (cache-control: $cache)"
+        log "  [dry-run] rclone sync $src -> $dst"
     else
-        rclone copy "$src" "$dst" \
-            --cache-control "$cache" \
+        rclone sync "$src" "$dst" \
             --s3-no-check-bucket \
             --transfers 16 \
             --tpslimit 0 \
@@ -99,12 +92,11 @@ rclone_sync_cmd() {
 }
 
 rclone_copy_cmd() {
-    src="$1" dst="$2" cache="$3" extra="$4"
+    src="$1" dst="$2" extra="$3"
     if [ "$DRY_RUN" -eq 1 ]; then
-        log "  [dry-run] rclone copy $src -> $dst (cache-control: $cache)"
+        log "  [dry-run] rclone copy $src -> $dst"
     else
         rclone copy "$src" "$dst" \
-            --cache-control "$cache" \
             --s3-no-check-bucket \
             --transfers 16 \
             --tpslimit 0 \
@@ -113,12 +105,11 @@ rclone_copy_cmd() {
 }
 
 rclone_put_cmd() {
-    src="$1" dst="$2" cache="$3"
+    src="$1" dst="$2"
     if [ "$DRY_RUN" -eq 1 ]; then
-        log "  [dry-run] rclone copyto $src -> $dst (cache-control: $cache)"
+        log "  [dry-run] rclone copyto $src -> $dst"
     else
         rclone copyto "$src" "$dst" \
-            --cache-control "$cache" \
             --s3-no-check-bucket
     fi
 }
@@ -199,7 +190,6 @@ log ""
 log "Uploading OSTree objects..."
 rclone_sync_cmd \
     "${REPO_DIR}/objects/" "${R2_PATH}/objects/" \
-    "public,max-age=31536000,immutable" \
     "--checksum"
 
 # Step 2 — static deltas (if present)
@@ -207,7 +197,6 @@ if [ -d "${REPO_DIR}/deltas" ]; then
     log "Uploading static deltas..."
     rclone_sync_cmd \
         "${REPO_DIR}/deltas/" "${R2_PATH}/deltas/" \
-        "public,max-age=86400" \
         "--checksum --create-empty-src-dirs"
 fi
 
@@ -215,21 +204,20 @@ fi
 log "Uploading refs..."
 rclone_sync_cmd \
     "${REPO_DIR}/refs/" "${R2_PATH}/refs/" \
-    "public,max-age=60" \
     "--checksum"
 
 # Step 4 — config
 if [ -f "${REPO_DIR}/config" ]; then
     log "Uploading config..."
-    rclone_put_cmd "${REPO_DIR}/config" "${R2_PATH}/config" "public,max-age=60"
+    rclone_put_cmd "${REPO_DIR}/config" "${R2_PATH}/config"
 fi
 
 # Step 5 — summary + signature (uploaded LAST so the repo is atomic)
 log "Uploading summary (atomic publish - last step)..."
-rclone_put_cmd "${REPO_DIR}/summary" "${R2_PATH}/summary" "no-cache"
+rclone_put_cmd "${REPO_DIR}/summary" "${R2_PATH}/summary"
 
 if [ -f "${REPO_DIR}/summary.sig" ]; then
-    rclone_put_cmd "${REPO_DIR}/summary.sig" "${R2_PATH}/summary.sig" "no-cache"
+    rclone_put_cmd "${REPO_DIR}/summary.sig" "${R2_PATH}/summary.sig"
 fi
 
 log ""
