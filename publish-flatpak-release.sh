@@ -36,7 +36,7 @@ Options:
   -h, --help               Show this help message
 
 The repository should be created using:
-  ostree init --repo=<repo-dir> --bare
+  ostree init --repo=<repo-dir> --mode=bare
   flatpak build-import-bundle <repo-dir> *.flatpak  # one bundle per call
 
 Or: flatpak build-export <repo-dir> <app-id>

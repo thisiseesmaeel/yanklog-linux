@@ -173,7 +173,7 @@ jobs:
           
           # Create flatpak repo from both architecture bundles
           rm -rf repo/
-          ostree init --repo=repo/ --bare
+          ostree init --repo=repo/ --mode=bare
           flatpak build-import-bundle repo/ flatpak-artifacts/yanklog-x86_64.flatpak
           flatpak build-import-bundle repo/ flatpak-artifacts/yanklog-aarch64.flatpak
 
