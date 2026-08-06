@@ -170,7 +170,8 @@ jobs:
           RCLONE_CONFIG_R2_SECRET_ACCESS_KEY: ${{ secrets.YANKLOG_R2_SECRET_ACCESS_KEY }}
         run: |
           set -eu
-          
+          git config --global --add safe.directory '*'
+
           # Create flatpak repo from both architecture bundles
           rm -rf repo/
           ostree init --repo=repo/ --mode=bare
