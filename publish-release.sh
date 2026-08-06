@@ -125,7 +125,8 @@ Url=https://downloads.yanklog.com/linux/flatpak
 EOF
 
     rclone copyto /tmp/yanklog.flatpakrepo \
-        "${R2_PATH}/yanklog.flatpakrepo"
+        "${R2_PATH}/yanklog.flatpakrepo" \
+        --s3-no-check-bucket
     log "Uploaded: yanklog.flatpakrepo"
 fi
 
