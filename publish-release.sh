@@ -125,8 +125,7 @@ Url=https://downloads.yanklog.com/linux/flatpak
 EOF
 
     rclone copyto /tmp/yanklog.flatpakrepo \
-        "${R2_PATH}/yanklog.flatpakrepo" \
-        --cache-control "public,max-age=3600"
+        "${R2_PATH}/yanklog.flatpakrepo"
     log "Uploaded: yanklog.flatpakrepo"
 fi
 
