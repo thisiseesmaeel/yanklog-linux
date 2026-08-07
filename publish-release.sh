@@ -119,7 +119,7 @@ if [ "$SKIP_FLATPAK" -eq 0 ]; then
     R2_PREFIX="linux/flatpak"
     R2_PATH="r2:${R2_BUCKET}/${R2_PREFIX}"
     cat > /tmp/yanklog.flatpakrepo << 'EOF'
-[Flatpak Remote]
+[Flatpak Repo]
 Name=yanklog
 Url=https://downloads.yanklog.com/linux/flatpak
 EOF
