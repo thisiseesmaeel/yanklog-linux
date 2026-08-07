@@ -103,4 +103,23 @@ if [ -d "$ICONS_DIR" ]; then
     rmdir "$ICONS_DIR" 2>/dev/null || true
 fi
 
+PATH_LINE="export PATH=\"${INSTALL_DIR}:\$PATH\""
+remove_path_line() {
+    rc_file="$1"
+    if [ -f "$rc_file" ] && grep -Fqs "$PATH_LINE" "$rc_file"; then
+        tmp_file="${rc_file}.yanklog-tmp"
+        grep -Fv "$PATH_LINE" "$rc_file" > "$tmp_file" || true
+        mv "$tmp_file" "$rc_file"
+        if [ -s "$rc_file" ]; then
+            log "Removed PATH entry from ${rc_file}"
+        else
+            rm -f "$rc_file"
+            log "Removed empty shell file: ${rc_file}"
+        fi
+    fi
+}
+remove_path_line "$HOME/.profile"
+remove_path_line "$HOME/.bashrc"
+remove_path_line "$HOME/.zshrc"
+
 log "Uninstall complete"
