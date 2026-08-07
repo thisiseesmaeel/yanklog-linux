@@ -191,18 +191,17 @@ When Flathub is not an option, the project can publish a self-hosted Flatpak
 repository to Cloudflare R2 alongside the AppImage releases. The repository lives
 at `https://downloads.yanklog.com/linux/flatpak/`.
 
-Users add the repository and install the app directly:
+Users add the repository and install the app directly
+(the self-hosted repo is currently unsigned, so `--no-gpg-verify` is required):
 
 ```sh
-flatpak remote-add --if-not-exists yanklog https://downloads.yanklog.com/linux/flatpak
-flatpak install yanklog com.yanklog.YankLog
+flatpak remote-add --user --if-not-exists yanklog https://downloads.yanklog.com/linux/flatpak/yanklog.flatpakrepo --no-gpg-verify
+flatpak install --user yanklog com.yanklog.YankLog
 ```
 
-Or via the provided `.flatpakrepo` descriptor:
-
-```sh
-flatpak install --user https://downloads.yanklog.com/linux/flatpak/yanklog.flatpakrepo
-```
+Note: `flatpak install <repo-url>` (the single-argument form) is not used here;
+older flatpak versions misinterpret the URL as an app name. Adding the remote
+first and then installing by app id is the reliable cross-version path.
 
 Updates are delivered by `flatpak update` or the user's software center, just as
 with Flathub.
