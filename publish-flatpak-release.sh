@@ -85,6 +85,7 @@ rclone_sync_cmd() {
     else
         rclone sync "$src" "$dst" \
             --s3-no-check-bucket \
+            --copy-links \
             --transfers 16 \
             --tpslimit 0 \
             $extra
@@ -98,6 +99,7 @@ rclone_copy_cmd() {
     else
         rclone copy "$src" "$dst" \
             --s3-no-check-bucket \
+            --copy-links \
             --transfers 16 \
             --tpslimit 0 \
             $extra
