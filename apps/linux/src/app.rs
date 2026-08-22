@@ -299,7 +299,8 @@ window.quick-picker-window {
 "#;
 
 pub fn run() {
-    let start_hidden = std::env::args().any(|arg| arg == "--background" || arg == "--hidden");
+    let start_background = std::env::args().any(|arg| arg == "--background");
+    let start_hidden = std::env::args().any(|arg| arg == "--hidden") || start_background;
 
     if std::env::args().any(|arg| arg == "--version") {
         println!("{APP_VERSION}");
@@ -316,13 +317,42 @@ pub fn run() {
         return;
     }
 
+    let profile = profile();
+    let config = Config::load(&profile).unwrap_or_default();
+
+    if start_background {
+        run_background_mode(&profile, config);
+        return;
+    }
+
     let application = adw::Application::builder().application_id(app_id()).build();
     application.connect_activate(move |app| {
         install_css();
-        apply_theme(&Config::load(&profile()).unwrap_or_default());
+        apply_theme(&Config::load(&profile).unwrap_or_default());
         build_main_window(app, !start_hidden);
     });
     application.run();
+}
+
+fn run_background_mode(profile: &Profile, config: Config) {
+    let database = match open_database_with_secure_key(profile) {
+        Ok(database) => Arc::new(Mutex::new(database)),
+        Err(err) => {
+            eprintln!("Failed to open yanklog database: {err}");
+            std::process::exit(1);
+        }
+    };
+    let pause_state = Arc::new(PauseState::default());
+    let monitor = ClipboardMonitor::new(config.poll_interval_ms);
+
+    start_clipboard_monitor(
+        Arc::clone(&database),
+        monitor,
+        config,
+        Arc::clone(&pause_state),
+    );
+
+    std::thread::park();
 }
 
 fn install_css() {
@@ -1338,7 +1368,7 @@ fn set_launch_at_startup(profile: &Profile, enabled: bool) -> Result<(), String>
     let name = profile.display_name();
     let exec = desktop_exec_quote(&launcher);
     let content = format!(
-        "[Desktop Entry]\nType=Application\nName={name}\nComment=Start {name} at login\nExec={exec} --background\nIcon=yanklog\nTerminal=false\nX-GNOME-Autostart-enabled=true\nNoDisplay=true\n"
+        "[Desktop Entry]\nType=Application\nName={name}\nComment=Start {name} at login\nExec={exec} --background\nIcon=com.yanklog.app\nTerminal=false\nX-GNOME-Autostart-enabled=true\nNoDisplay=true\n"
     );
     std::fs::write(&desktop_file, content)
         .map_err(|err| format!("Could not write startup entry: {err}"))?;

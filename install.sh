@@ -335,7 +335,7 @@ if [ "$SKIP_DESKTOP" -eq 0 ]; then
     ICONS_DIR="${DATA_HOME}/icons/hicolor/scalable/apps"
     DESKTOP_FILE="${APPLICATIONS_DIR}/com.yanklog.app.desktop"
     QUICK_PICK_DESKTOP_FILE="${APPLICATIONS_DIR}/com.yanklog.app.quickpick.desktop"
-    ICON_FILE="${ICONS_DIR}/yanklog.svg"
+    ICON_FILE="${ICONS_DIR}/com.yanklog.app.svg"
     DESKTOP_EXEC="$(desktop_exec_quote "$TARGET_BIN")"
 
     mkdir -p "$APPLICATIONS_DIR"
@@ -348,7 +348,7 @@ Name=YankLog
 GenericName=Clipboard Manager
 Comment=Clipboard manager for Linux
 Exec=${DESKTOP_EXEC}
-Icon=yanklog
+Icon=com.yanklog.app
 Terminal=false
 Categories=Utility;
 Keywords=clipboard;history;copy;paste;yanklog;
@@ -358,7 +358,7 @@ Actions=QuickPick;
 [Desktop Action QuickPick]
 Name=Quick Pick
 Exec=${DESKTOP_EXEC} --pick
-Icon=yanklog
+Icon=com.yanklog.app
 EOF
 
     cat > "$QUICK_PICK_DESKTOP_FILE" <<EOF
@@ -367,7 +367,7 @@ Type=Application
 Name=yanklog Quick Pick
 Comment=Open the yanklog quick picker
 Exec=${DESKTOP_EXEC} --pick
-Icon=yanklog
+Icon=com.yanklog.app
 Terminal=false
 Categories=Utility;
 StartupNotify=false
@@ -376,6 +376,10 @@ EOF
 
     if ! download_file "$ICON_URL" "$ICON_FILE"; then
         log "Warning: could not download icon from ${ICON_URL}"
+    fi
+
+    if have_cmd gtk-update-icon-cache; then
+        gtk-update-icon-cache -f -t "$DATA_HOME/icons/hicolor" >/dev/null 2>&1 || true
     fi
 
     if have_cmd update-desktop-database; then
