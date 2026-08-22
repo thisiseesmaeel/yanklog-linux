@@ -19,7 +19,7 @@ modules:
       env:
         CARGO_HOME: /run/build/yanklog/cargo
     build-commands:
-      - export CARGO_BIN="$(find "$(pwd)" -maxdepth 4 -type f -path '*/rust-1.85.0-*/cargo/bin/cargo' | head -1)"
+      - export CARGO_BIN="$(find "$(pwd)" -maxdepth 4 -type f -path "*/rust-1.92.0-$(uname -m)-unknown-linux-gnu/cargo/bin/cargo" | head -1)"
         && export RUSTDIR="$(dirname "$(dirname "$CARGO_BIN")")"
         && export PATH="$RUSTDIR/cargo/bin:$RUSTDIR/rustc/bin:$PATH"
         && cargo build --release --offline --locked -p yanklog-linux-native --features flatpak --bin yanklog
@@ -34,9 +34,9 @@ modules:
       - generated-sources.json
       - type: archive
         archive-type: tar-xz
-        url: https://static.rust-lang.org/dist/rust-1.85.0-x86_64-unknown-linux-gnu.tar.xz
-        sha256: 6f8b323ed2a34ccf0031631b85d79e1133da662094566bc910432da9bd3a5b42
+        url: https://static.rust-lang.org/dist/rust-1.92.0-x86_64-unknown-linux-gnu.tar.xz
+        sha256: d2ccef59dd9f7439f2c694948069f789a044dc1addcc0803613232af8f88ee0c
       - type: archive
         archive-type: tar-xz
-        url: https://static.rust-lang.org/dist/rust-1.85.0-aarch64-unknown-linux-gnu.tar.xz
-        sha256: 024918027c349bd237617a8a1207d7c4462f70549a31e8bf6c14b0601cfd489e
+        url: https://static.rust-lang.org/dist/rust-1.92.0-aarch64-unknown-linux-gnu.tar.xz
+        sha256: 3e383f8b4fca710d0600d0c1de97b78281672be2cda6575ecbe1c183a12e3822
