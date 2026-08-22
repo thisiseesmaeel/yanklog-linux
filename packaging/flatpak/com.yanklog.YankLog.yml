@@ -19,7 +19,10 @@ modules:
       env:
         CARGO_HOME: /run/build/yanklog/cargo
     build-commands:
-      - export PATH="$(pwd)/rust-1.85.0-$(uname -m)-unknown-linux-gnu/cargo/bin:$(pwd)/rust-1.85.0-$(uname -m)-unknown-linux-gnu/rustc/bin:$PATH" && cargo build --release --offline --locked -p yanklog-linux-native --features flatpak --bin yanklog
+      - export CARGO_BIN="$(find "$(pwd)" -maxdepth 4 -type f -path '*/rust-1.85.0-*/cargo/bin/cargo' | head -1)"
+        && export RUSTDIR="$(dirname "$(dirname "$CARGO_BIN")")"
+        && export PATH="$RUSTDIR/cargo/bin:$RUSTDIR/rustc/bin:$PATH"
+        && cargo build --release --offline --locked -p yanklog-linux-native --features flatpak --bin yanklog
       - install -Dm755 target/release/yanklog /app/bin/yanklog
       - install -Dm644 packaging/flatpak/com.yanklog.YankLog.desktop /app/share/applications/com.yanklog.YankLog.desktop
       - install -Dm644 assets/logo.svg /app/share/icons/hicolor/scalable/apps/com.yanklog.YankLog.svg
