@@ -2,8 +2,6 @@ app-id: com.yanklog.YankLog
 runtime: org.gnome.Platform
 runtime-version: "50"
 sdk: org.gnome.Sdk
-sdk-extensions:
-  - org.freedesktop.Sdk.Extension.rust-stable
 command: yanklog
 
 finish-args:
@@ -18,10 +16,11 @@ modules:
   - name: yanklog
     buildsystem: simple
     build-options:
-      append-path: /usr/lib/sdk/rust-stable/bin
+      append-path: /run/build/yanklog/cargo/bin
       env:
         CARGO_HOME: /run/build/yanklog/cargo
     build-commands:
+      - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
       - cargo build --release --offline --locked -p yanklog-linux-native --features flatpak --bin yanklog
       - install -Dm755 target/release/yanklog /app/bin/yanklog
       - install -Dm644 packaging/flatpak/com.yanklog.YankLog.desktop /app/share/applications/com.yanklog.YankLog.desktop
