@@ -23,6 +23,21 @@ jobs:
             runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v5
+      - name: Refresh Flathub remote
+        run: |
+          flatpak --system remote-delete flathub || true
+          flatpak --system remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+      - name: Pre-install Rust SDK extension
+        run: |
+          for attempt in 1 2 3; do
+            if flatpak --system install -y --noninteractive flathub org.freedesktop.Sdk.Extension.rust-stable; then
+              exit 0
+            fi
+            echo "Attempt $attempt failed, retrying..."
+            sleep 10
+          done
+          echo "Failed to install Rust SDK extension after 3 attempts"
+          exit 1
       - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
         with:
           bundle: yanklog-${{ matrix.arch }}.flatpak
