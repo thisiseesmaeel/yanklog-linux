@@ -16,13 +16,12 @@ modules:
   - name: yanklog
     buildsystem: simple
     build-options:
+      append-path: /app/rust/bin
       env:
         CARGO_HOME: /run/build/yanklog/cargo
     build-commands:
-      - export CARGO_BIN="$(find "$(pwd)" -maxdepth 4 -type f -path "*/rust-1.92.0-$(uname -m)-unknown-linux-gnu/cargo/bin/cargo" | head -1)"
-        && export RUSTDIR="$(dirname "$(dirname "$CARGO_BIN")")"
-        && export PATH="$RUSTDIR/cargo/bin:$RUSTDIR/rustc/bin:$PATH"
-        && cargo build --release --offline --locked -p yanklog-linux-native --features flatpak --bin yanklog
+      - ./rust-toolchain/install.sh --prefix=/app/rust --without=rust-docs --without=rust-docs-json-preview --disable-ldconfig
+      - cargo build --release --offline --locked -p yanklog-linux-native --features flatpak --bin yanklog
       - install -Dm755 target/release/yanklog /app/bin/yanklog
       - install -Dm644 packaging/flatpak/com.yanklog.YankLog.desktop /app/share/applications/com.yanklog.YankLog.desktop
       - install -Dm644 assets/logo.svg /app/share/icons/hicolor/scalable/apps/com.yanklog.YankLog.svg
@@ -33,10 +32,16 @@ modules:
         path: ../..
       - generated-sources.json
       - type: archive
+        only-arches:
+          - x86_64
+        dest: rust-toolchain
         archive-type: tar-xz
         url: https://static.rust-lang.org/dist/rust-1.92.0-x86_64-unknown-linux-gnu.tar.xz
         sha256: d2ccef59dd9f7439f2c694948069f789a044dc1addcc0803613232af8f88ee0c
       - type: archive
+        only-arches:
+          - aarch64
+        dest: rust-toolchain
         archive-type: tar-xz
         url: https://static.rust-lang.org/dist/rust-1.92.0-aarch64-unknown-linux-gnu.tar.xz
         sha256: 3e383f8b4fca710d0600d0c1de97b78281672be2cda6575ecbe1c183a12e3822
