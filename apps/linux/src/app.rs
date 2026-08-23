@@ -352,7 +352,50 @@ fn run_background_mode(profile: &Profile, config: Config) {
         Arc::clone(&pause_state),
     );
 
-    std::thread::park();
+    let (sender, receiver) = mpsc::channel();
+    let tray = YanklogTray {
+        sender,
+        update_available: None,
+        pause_state: Arc::clone(&pause_state),
+    };
+    let Ok(handle) = tray
+        .assume_sni_available(true)
+        .disable_dbus_name(is_flatpak_build())
+        .spawn()
+    else {
+        std::thread::park();
+        return;
+    };
+    std::mem::forget(handle);
+
+    loop {
+        while let Ok(command) = receiver.try_recv() {
+            match command {
+                TrayCommand::Show => {
+                    let _ = Command::new(std::env::current_exe().unwrap())
+                        .arg("--hidden")
+                        .spawn();
+                }
+                TrayCommand::QuickPick => {
+                    let _ = Command::new(std::env::current_exe().unwrap())
+                        .arg("--pick")
+                        .spawn();
+                }
+                TrayCommand::PauseFor(seconds) => {
+                    pause_state.pause(seconds.map(Duration::from_secs));
+                }
+                TrayCommand::PauseUntilTomorrow => {
+                    pause_state.pause(pause_until_tomorrow_duration());
+                }
+                TrayCommand::Resume => {
+                    pause_state.resume();
+                }
+                TrayCommand::CheckUpdate | TrayCommand::Settings => {}
+                TrayCommand::Quit => std::process::exit(0),
+            }
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
 }
 
 fn install_css() {
