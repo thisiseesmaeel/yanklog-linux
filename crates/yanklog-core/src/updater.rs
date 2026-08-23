@@ -5,8 +5,6 @@ use std::process::{Command, Stdio};
 
 use crate::profile::{Platform, Profile};
 
-const DEFAULT_DOWNLOADS_ROOT_URL: &str = "https://downloads.yanklog.com";
-
 pub fn check_for_update(
     profile: &Profile,
     current_version: &str,
@@ -15,17 +13,16 @@ pub fn check_for_update(
         return Ok(None);
     }
 
-    let latest_version_url = match profile.platform {
-        Platform::Linux => format!(
-            "{}/latest-version.txt",
-            platform_downloads_base_url(profile.platform)
-        ),
-        Platform::MacOS => format!(
-            "{}/latest-macos-version.txt",
-            platform_downloads_base_url(profile.platform)
-        ),
-    };
-    let latest_version = sanitize_version(&download_text(&latest_version_url)?)?;
+    let repo = env::var("YANKLOG_GITHUB_REPO")
+        .unwrap_or_else(|_| "thisiseesmaeel/yanklog-linux".to_string());
+    let url = format!("https://api.github.com/repos/{repo}/releases/latest");
+    let json = download_text(&url)?;
+    let parsed: serde_json::Value = serde_json::from_str(&json)
+        .map_err(|e| format!("Failed to parse release info: {e}"))?;
+    let tag = parsed["tag_name"]
+        .as_str()
+        .ok_or_else(|| "No tag_name in release response".to_string())?;
+    let latest_version = sanitize_version(tag)?;
 
     if is_newer_version(&latest_version, current_version) {
         Ok(Some(latest_version))
@@ -129,25 +126,6 @@ pub fn install_update(
     } else {
         format!("Installer exited with status {}", output.status)
     })
-}
-
-fn platform_downloads_base_url(platform: Platform) -> String {
-    let platform_base = match platform {
-        Platform::Linux => env::var("YANKLOG_BASE_URL").ok(),
-        Platform::MacOS => env::var("YANKLOG_MACOS_BASE_URL").ok(),
-    };
-
-    if let Some(base_url) = platform_base {
-        return base_url.trim_end_matches('/').to_string();
-    }
-
-    let root = env::var("YANKLOG_DOWNLOADS_ROOT_URL")
-        .unwrap_or_else(|_| DEFAULT_DOWNLOADS_ROOT_URL.to_string());
-    let platform_path = match platform {
-        Platform::Linux => "linux",
-        Platform::MacOS => "macos",
-    };
-    format!("{}/{}", root.trim_end_matches('/'), platform_path)
 }
 
 fn sanitize_version(version: &str) -> Result<String, String> {
