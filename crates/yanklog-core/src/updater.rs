@@ -34,16 +34,30 @@ pub fn check_for_update(
     }
 }
 
-pub fn release_notes(profile: &Profile, version: &str) -> Result<Option<String>, String> {
+pub fn release_notes(_profile: &Profile, version: &str) -> Result<Option<String>, String> {
     let version = sanitize_version(version)?;
+    let repo = env::var("YANKLOG_GITHUB_REPO")
+        .unwrap_or_else(|_| "thisiseesmaeel/yanklog-linux".to_string());
     let url = format!(
-        "{}/release-notes-{}.txt",
-        platform_downloads_base_url(profile.platform),
-        version
+        "https://api.github.com/repos/{repo}/releases/tags/v{version}"
     );
     match download_text(&url) {
-        Ok(notes) if !notes.trim().is_empty() => Ok(Some(notes.trim().to_string())),
-        Ok(_) | Err(_) => Ok(None),
+        Ok(json) => {
+            let parsed: serde_json::Value = serde_json::from_str(&json)
+                .map_err(|e| format!("Failed to parse release notes: {e}"))?;
+            if let Some(message) = parsed["message"].as_str() {
+                if !message.eq_ignore_ascii_case("Not Found") {
+                    return Err(message.to_string());
+                }
+            }
+            let body = parsed["body"].as_str().unwrap_or("").trim();
+            if body.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(body.to_string()))
+            }
+        }
+        Err(_) => Ok(None),
     }
 }
 

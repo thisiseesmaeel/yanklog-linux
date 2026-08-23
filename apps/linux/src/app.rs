@@ -454,7 +454,7 @@ fn run_cli_update() {
 
     match profile_release_notes(&profile, &latest_version) {
         Ok(Some(notes)) => println!("Release notes for {latest_version}:\n\n{notes}\n"),
-        Ok(None) => {}
+        Ok(None) => println!("No release notes available for {latest_version}.\n"),
         Err(err) => eprintln!("Could not load release notes: {err}"),
     }
 
@@ -1174,24 +1174,25 @@ fn show_update_status_window(app: &adw::Application) {
     let update_window = gtk::ApplicationWindow::builder()
         .application(app)
         .title("Check for update")
-        .default_width(520)
-        .default_height(340)
+        .default_width(460)
+        .default_height(320)
         .decorated(true)
         .build();
 
     let status = gtk::Label::new(Some("Checking for update..."));
     status.set_xalign(0.0);
     status.set_wrap(true);
-    status.add_css_class("settings-note");
+    status.add_css_class("title-4");
 
     let release_notes = gtk::Label::new(None);
     release_notes.set_xalign(0.0);
     release_notes.set_yalign(0.0);
     release_notes.set_wrap(true);
     release_notes.set_selectable(true);
-    release_notes.add_css_class("settings-note");
+    release_notes.set_width_chars(40);
     let notes_scroller = gtk::ScrolledWindow::builder()
         .vexpand(true)
+        .hexpand(true)
         .child(&release_notes)
         .build();
     notes_scroller.set_visible(false);
@@ -1213,12 +1214,11 @@ fn show_update_status_window(app: &adw::Application) {
     button_row.append(&install_button);
     button_row.append(&close_button);
 
-    let content = gtk::Box::new(gtk::Orientation::Vertical, 16);
-    content.add_css_class("app-root");
-    content.set_margin_top(20);
-    content.set_margin_bottom(20);
-    content.set_margin_start(20);
-    content.set_margin_end(20);
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    content.set_margin_top(12);
+    content.set_margin_bottom(12);
+    content.set_margin_start(16);
+    content.set_margin_end(16);
     content.append(&status);
     content.append(&notes_scroller);
     content.append(&button_row);
