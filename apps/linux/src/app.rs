@@ -335,6 +335,17 @@ pub fn run() {
 }
 
 fn run_background_mode(profile: &Profile, config: Config) {
+    let lock_path = profile.data_dir().join("background.lock");
+    let _ = std::fs::create_dir_all(lock_path.parent().unwrap());
+    if let Ok(existing) = std::fs::read_to_string(&lock_path) {
+        if let Ok(pid) = existing.trim().parse::<u32>() {
+            if is_process_alive(pid) {
+                std::process::exit(0);
+            }
+        }
+    }
+    let _ = std::fs::write(&lock_path, std::process::id().to_string());
+
     let database = match open_database_with_secure_key(profile) {
         Ok(database) => Arc::new(Mutex::new(database)),
         Err(err) => {
@@ -366,15 +377,14 @@ fn run_background_mode(profile: &Profile, config: Config) {
         std::thread::park();
         return;
     };
+    let tray_handle = handle.clone();
     std::mem::forget(handle);
 
     loop {
         while let Ok(command) = receiver.try_recv() {
             match command {
                 TrayCommand::Show => {
-                    let _ = Command::new(std::env::current_exe().unwrap())
-                        .arg("--hidden")
-                        .spawn();
+                    let _ = Command::new(std::env::current_exe().unwrap()).spawn();
                 }
                 TrayCommand::QuickPick => {
                     let _ = Command::new(std::env::current_exe().unwrap())
@@ -383,12 +393,15 @@ fn run_background_mode(profile: &Profile, config: Config) {
                 }
                 TrayCommand::PauseFor(seconds) => {
                     pause_state.pause(seconds.map(Duration::from_secs));
+                    let _ = tray_handle.update(|_| {});
                 }
                 TrayCommand::PauseUntilTomorrow => {
                     pause_state.pause(pause_until_tomorrow_duration());
+                    let _ = tray_handle.update(|_| {});
                 }
                 TrayCommand::Resume => {
                     pause_state.resume();
+                    let _ = tray_handle.update(|_| {});
                 }
                 TrayCommand::CheckUpdate | TrayCommand::Settings => {}
                 TrayCommand::Quit => std::process::exit(0),
@@ -396,6 +409,10 @@ fn run_background_mode(profile: &Profile, config: Config) {
         }
         thread::sleep(Duration::from_millis(200));
     }
+}
+
+fn is_process_alive(pid: u32) -> bool {
+    Path::new(&format!("/proc/{pid}")).exists()
 }
 
 fn install_css() {
