@@ -1,8 +1,11 @@
 use adw::prelude::*;
 use ashpd::desktop::background::Background;
+use fs2::FileExt;
 use gtk::glib;
 use ksni::blocking::TrayMethods;
 use std::cell::{Cell, RefCell};
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::rc::Rc;
@@ -337,14 +340,32 @@ pub fn run() {
 fn run_background_mode(profile: &Profile, config: Config) {
     let lock_path = profile.data_dir().join("background.lock");
     let _ = std::fs::create_dir_all(lock_path.parent().unwrap());
-    if let Ok(existing) = std::fs::read_to_string(&lock_path) {
-        if let Ok(pid) = existing.trim().parse::<u32>() {
-            if is_process_alive(pid) {
-                std::process::exit(0);
-            }
+    let mut background_lock = match OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+    {
+        Ok(file) => file,
+        Err(error) => {
+            eprintln!("Failed to open YankLog background lock: {error}");
+            std::process::exit(1);
+        }
+    };
+    match background_lock.try_lock_exclusive() {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            // Another YankLog background process owns the lock. This can happen when
+            // GNOME restores the session as well as processing the autostart entry.
+            std::process::exit(0);
+        }
+        Err(error) => {
+            eprintln!("Failed to lock YankLog background process: {error}");
+            std::process::exit(1);
         }
     }
-    let _ = std::fs::write(&lock_path, std::process::id().to_string());
+    let _ = background_lock.set_len(0);
+    let _ = write!(background_lock, "{}", std::process::id());
 
     let database = match open_database_with_secure_key(profile) {
         Ok(database) => Arc::new(Mutex::new(database)),
@@ -409,10 +430,6 @@ fn run_background_mode(profile: &Profile, config: Config) {
         }
         thread::sleep(Duration::from_millis(200));
     }
-}
-
-fn is_process_alive(pid: u32) -> bool {
-    Path::new(&format!("/proc/{pid}")).exists()
 }
 
 fn install_css() {
