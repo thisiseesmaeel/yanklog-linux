@@ -1,6 +1,6 @@
 use adw::prelude::*;
 use ashpd::desktop::background::Background;
-use fs2::FileExt;
+use fs2::FileExt as FsFileExt;
 use gtk::glib;
 use ksni::blocking::TrayMethods;
 use std::cell::{Cell, RefCell};
