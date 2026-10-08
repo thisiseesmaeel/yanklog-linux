@@ -260,6 +260,24 @@ impl YanklogStore {
             .insert_entry(&content, &content_type)?)
     }
 
+    /// Stores copied text unless the privacy rules reject it, then applies the
+    /// history limit and retention settings. Returns whether the text was stored.
+    pub fn capture_text(&self, content: String) -> Result<bool, YanklogError> {
+        let config = Config::load(&self.profile).unwrap_or_default();
+        if config.should_ignore_clipboard(&content) {
+            return Ok(false);
+        }
+        let database = self.database.lock().map_err(|_| YanklogError::Message {
+            message: "Database lock was poisoned.".to_string(),
+        })?;
+        database.insert_entry(&content, "text")?;
+        if config.max_history_size > 0 {
+            database.prune_old_entries(config.max_history_size)?;
+        }
+        database.clear_older_than_days(config.retention.max_age_days)?;
+        Ok(true)
+    }
+
     pub fn delete_entry(&self, id: i64) -> Result<(), YanklogError> {
         self.database
             .lock()

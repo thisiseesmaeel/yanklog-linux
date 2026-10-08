@@ -167,10 +167,10 @@ impl Database {
         let mut stmt = self.conn.prepare(
             "SELECT id, content, content_type, timestamp, is_favorite
              FROM clipboard_history
-             WHERE content LIKE ?1
+             WHERE content LIKE ?1 ESCAPE '\\'
              ORDER BY is_favorite DESC, timestamp DESC, id DESC",
         )?;
-        let pattern = format!("%{query}%");
+        let pattern = like_pattern(query);
         let entries = stmt.query_map([pattern], entry_from_row)?;
         entries.collect()
     }
@@ -184,11 +184,11 @@ impl Database {
         let mut stmt = self.conn.prepare(
             "SELECT id, content, content_type, timestamp, is_favorite
              FROM clipboard_history
-             WHERE content LIKE ?1
+             WHERE content LIKE ?1 ESCAPE '\\'
              ORDER BY is_favorite DESC, timestamp DESC, id DESC
              LIMIT ?2 OFFSET ?3",
         )?;
-        let pattern = format!("%{query}%");
+        let pattern = like_pattern(query);
         let entries = stmt.query_map(
             params![pattern, limit as i64, offset as i64],
             entry_from_row,
@@ -197,9 +197,9 @@ impl Database {
     }
 
     pub fn count_search_history(&self, query: &str) -> Result<usize> {
-        let pattern = format!("%{query}%");
+        let pattern = like_pattern(query);
         let count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM clipboard_history WHERE content LIKE ?1",
+            "SELECT COUNT(*) FROM clipboard_history WHERE content LIKE ?1 ESCAPE '\\'",
             [pattern],
             |row| row.get(0),
         )?;
@@ -305,6 +305,20 @@ impl Database {
     }
 }
 
+/// Builds a substring LIKE pattern that matches `query` literally.
+fn like_pattern(query: &str) -> String {
+    let mut pattern = String::with_capacity(query.len() + 2);
+    pattern.push('%');
+    for character in query.chars() {
+        if matches!(character, '%' | '_' | '\\') {
+            pattern.push('\\');
+        }
+        pattern.push(character);
+    }
+    pattern.push('%');
+    pattern
+}
+
 fn entry_from_row(row: &rusqlite::Row<'_>) -> Result<ClipboardEntry> {
     Ok(ClipboardEntry {
         id: row.get(0)?,
@@ -372,6 +386,24 @@ mod tests {
         assert_eq!(restored.is_favorite, deleted.is_favorite);
         assert!(!dir.join("secret.key").exists());
 
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn search_matches_like_wildcards_literally() {
+        let dir =
+            std::env::temp_dir().join(format!("yanklog-core-like-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let db = Database::open_at(dir.clone()).unwrap();
+        db.insert_entry("100% done", "text").unwrap();
+        db.insert_entry("snake_case", "text").unwrap();
+        db.insert_entry("plain words", "text").unwrap();
+
+        assert_eq!(db.search_history("%", None).unwrap().len(), 1);
+        assert_eq!(db.count_search_history("_").unwrap(), 1);
+        assert_eq!(db.search_history_page("0% d", 10, 0).unwrap().len(), 1);
+
+        drop(db);
         let _ = std::fs::remove_dir_all(dir);
     }
 
