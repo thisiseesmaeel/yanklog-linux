@@ -149,6 +149,41 @@ impl Database {
         entries.collect()
     }
 
+    /// History for Quick Pick. Pinned entries sort first, so they are capped at half
+    /// of `limit` whenever recent entries can fill the rest; otherwise enough pins
+    /// could hide every recent entry.
+    pub fn get_quick_pick_history(
+        &self,
+        limit: usize,
+        pinned_only: bool,
+    ) -> Result<Vec<ClipboardEntry>> {
+        let limit = limit.max(1);
+        let mut pinned = self.history_by_pin_state(true, limit)?;
+        if pinned_only {
+            return Ok(pinned);
+        }
+        let mut recent = self.history_by_pin_state(false, limit)?;
+        let pin_slots = pinned
+            .len()
+            .min((limit - recent.len().min(limit)).max(limit / 2));
+        pinned.truncate(pin_slots);
+        recent.truncate(limit - pin_slots);
+        pinned.append(&mut recent);
+        Ok(pinned)
+    }
+
+    fn history_by_pin_state(&self, pinned: bool, limit: usize) -> Result<Vec<ClipboardEntry>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, content, content_type, timestamp, is_favorite
+             FROM clipboard_history
+             WHERE is_favorite = ?1
+             ORDER BY timestamp DESC, id DESC
+             LIMIT ?2",
+        )?;
+        let entries = stmt.query_map(params![i64::from(pinned), limit as i64], entry_from_row)?;
+        entries.collect()
+    }
+
     pub fn get_history_page(&self, limit: usize, offset: usize) -> Result<Vec<ClipboardEntry>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, content, content_type, timestamp, is_favorite
@@ -386,6 +421,36 @@ mod tests {
         assert_eq!(restored.is_favorite, deleted.is_favorite);
         assert!(!dir.join("secret.key").exists());
 
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn quick_pick_history_keeps_recent_entries_reachable() {
+        let dir =
+            std::env::temp_dir().join(format!("yanklog-core-pick-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let db = Database::open_at(dir.clone()).unwrap();
+        for index in 0..6 {
+            let id = db.insert_entry(&format!("pinned {index}"), "text").unwrap();
+            db.toggle_favorite(id).unwrap();
+        }
+        for index in 0..6 {
+            db.insert_entry(&format!("recent {index}"), "text").unwrap();
+        }
+
+        let mixed = db.get_quick_pick_history(4, false).unwrap();
+        assert_eq!(mixed.len(), 4);
+        assert_eq!(mixed.iter().filter(|entry| entry.is_favorite).count(), 2);
+
+        let pinned = db.get_quick_pick_history(4, true).unwrap();
+        assert_eq!(pinned.len(), 4);
+        assert!(pinned.iter().all(|entry| entry.is_favorite));
+
+        db.clear_unpinned_history().unwrap();
+        let only_pins = db.get_quick_pick_history(4, false).unwrap();
+        assert_eq!(only_pins.len(), 4);
+
+        drop(db);
         let _ = std::fs::remove_dir_all(dir);
     }
 

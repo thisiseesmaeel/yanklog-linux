@@ -28,6 +28,17 @@ impl ClipboardMonitor {
         }
     }
 
+    /// Records the current clipboard text as already seen without reporting it,
+    /// so text copied while capture is paused is not picked up afterwards.
+    pub fn mark_current_as_seen(&self) {
+        let Ok(mut clipboard) = Clipboard::new() else {
+            return;
+        };
+        if let Ok(current) = clipboard.get_text() {
+            self.update_last_content(&current);
+        }
+    }
+
     pub fn update_last_content(&self, content: &str) {
         if let Ok(mut last) = self.last_content.lock() {
             *last = content.to_string();
