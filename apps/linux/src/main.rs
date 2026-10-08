@@ -1,3 +1,7 @@
+// Toolkit-independent logic, built and tested on every platform.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+mod logic;
+
 #[cfg(target_os = "linux")]
 mod app;
 

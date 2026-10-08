@@ -6,21 +6,28 @@ use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 use yanklog_core::{
     check_for_update, copy_to_clipboard, install_profile_update, profile_release_notes,
     ClipboardMonitor, Config, Database, Platform, Profile, ThemePreference,
 };
 
+use crate::logic::{content_summary, section_title, truncate_preview, PauseState, SecretHint};
+
 const DIRECT_APP_ID: &str = "com.yanklog.app";
 const FLATPAK_APP_ID: &str = "com.yanklog.YankLog";
 const BUNDLED_LINUX_INSTALL_SCRIPT: &str = include_str!("../../../install.sh");
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
-const QUICK_PICKER_WIDTH: i32 = 560;
-const QUICK_PICKER_HEIGHT: i32 = 420;
+const QUICK_PICKER_WIDTH: i32 = 620;
+const QUICK_PICKER_HEIGHT: i32 = 460;
+const QUICK_PICKER_LIST_WIDTH: i32 = 262;
+const QUICK_PICKER_PREVIEW_CHARS: usize = 4_000;
+/// Password managers such as KeePassXC flag secrets with this clipboard format.
+const PASSWORD_MANAGER_HINT: &str = "x-kde-passwordManagerHint";
 const HISTORY_PAGE_SIZE: usize = 100;
 
 fn is_flatpak_build() -> bool {
@@ -43,65 +50,9 @@ fn picker_app_id() -> &'static str {
     }
 }
 
-#[derive(Debug, Default)]
-struct PauseState {
-    paused: std::sync::atomic::AtomicBool,
-    until: Mutex<Option<SystemTime>>,
-}
-
-impl PauseState {
-    fn pause(&self, duration: Option<Duration>) {
-        if let Ok(mut until) = self.until.lock() {
-            *until = duration.and_then(|duration| SystemTime::now().checked_add(duration));
-        }
-        self.paused.store(true, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    fn resume(&self) {
-        if let Ok(mut until) = self.until.lock() {
-            *until = None;
-        }
-        self.paused
-            .store(false, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    fn is_paused(&self) -> bool {
-        if !self.paused.load(std::sync::atomic::Ordering::SeqCst) {
-            return false;
-        }
-        let expired = self
-            .until
-            .lock()
-            .ok()
-            .and_then(|until| *until)
-            .is_some_and(|until| SystemTime::now() >= until);
-        if expired {
-            self.resume();
-            return false;
-        }
-        true
-    }
-
-    fn monitoring_label(&self) -> String {
-        if !self.is_paused() {
-            return "Monitoring clipboard".to_string();
-        }
-        let remaining = self
-            .until
-            .lock()
-            .ok()
-            .and_then(|until| *until)
-            .and_then(|until| until.duration_since(SystemTime::now()).ok());
-        match remaining {
-            Some(duration) => {
-                let minutes = duration.as_secs().div_ceil(60).max(1);
-                format!("Monitoring paused · {minutes} min remaining")
-            }
-            None => "Monitoring paused".to_string(),
-        }
-    }
-}
 const YANKLOG_CSS: &str = r#"
+@define-color yanklog_green #1F7A3D;
+
 window {
   background: @window_bg_color;
   color: @window_fg_color;
@@ -117,8 +68,8 @@ headerbar {
 }
 
 button {
-  min-height: 38px;
-  padding: 0 18px;
+  min-height: 32px;
+  padding: 0 14px;
   border-radius: 8px;
   color: @window_fg_color;
   background: @view_bg_color;
@@ -133,6 +84,12 @@ button:hover {
 button.destructive-action {
   color: @error_color;
   border-color: alpha(@error_color, 0.45);
+}
+
+button.suggested-action {
+  color: white;
+  background: @yanklog_green;
+  border-color: @yanklog_green;
 }
 
 headerbar button,
@@ -152,17 +109,17 @@ headerbar button:hover {
 }
 
 entry {
-  min-height: 46px;
-  border-radius: 8px;
+  min-height: 36px;
+  border-radius: 9px;
   color: @window_fg_color;
-  background: @view_bg_color;
-  border: 1px solid @borders;
+  background: alpha(@window_fg_color, 0.06);
+  border: 1px solid transparent;
   box-shadow: none;
 }
 
 entry:focus,
 .search-entry:focus {
-  border-color: @accent_color;
+  border-color: @yanklog_green;
   box-shadow: none;
 }
 
@@ -176,88 +133,113 @@ window.quick-picker-window {
 
 .quick-picker-root {
   background: @window_bg_color;
-  border-radius: 8px;
-  padding: 12px;
-}
-
-.content-header {
-  margin-bottom: 12px;
+  border: 1px solid @borders;
+  border-radius: 14px;
 }
 
 .app-title {
   color: @window_fg_color;
-  font-size: 34px;
-  font-weight: 800;
+  font-size: 20px;
+  font-weight: 700;
 }
 
-.monitoring {
-  color: @success_color;
+.page-title {
+  color: @window_fg_color;
+  font-size: 22px;
+  font-weight: 700;
+}
+
+.dialog-title {
+  color: @window_fg_color;
   font-size: 16px;
+  font-weight: 700;
+}
+
+.status-pill {
+  padding: 3px 10px;
+  border-radius: 999px;
+  color: @success_color;
+  background: alpha(@success_color, 0.14);
+  font-size: 12px;
   font-weight: 600;
 }
 
-.muted {
+.status-pill.paused {
+  color: @warning_color;
+  background: alpha(@warning_color, 0.14);
+}
+
+.muted,
+.footer-note {
   color: alpha(@window_fg_color, 0.68);
+}
+
+.footer-note,
+.quick-picker-hint {
+  font-size: 12px;
 }
 
 .quick-picker-hint {
   color: alpha(@window_fg_color, 0.68);
-  font-size: 12px;
-}
-
-.privacy-card {
-  min-height: 52px;
-  padding: 0 14px;
-  border-radius: 8px;
-  background: alpha(@success_color, 0.16);
-  border: 1px solid alpha(@success_color, 0.72);
-}
-
-.privacy-title {
-  color: @success_color;
-  font-weight: 700;
+  padding: 8px 16px;
+  border-top: 1px solid @borders;
 }
 
 .history-list {
-  background: @view_bg_color;
-  border: 1px solid @borders;
-  border-radius: 8px;
+  background: transparent;
+}
+
+.section-row,
+.section-row:hover {
+  background: transparent;
+}
+
+.section-title {
+  color: alpha(@window_fg_color, 0.68);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
 }
 
 .history-row {
-  background: @view_bg_color;
+  background: transparent;
   color: @window_fg_color;
-  border-bottom: 1px solid @borders;
+  border-radius: 8px;
+  margin: 1px 0;
 }
 
 .history-row:hover {
-  background: @card_bg_color;
+  background: alpha(@window_fg_color, 0.04);
 }
 
-.history-row.quick-selected,
 .history-row:selected {
-  background: alpha(@accent_color, 0.22);
-}
-
-.history-row.quick-selected .row-preview,
-.history-row:selected .row-preview {
-  color: @window_fg_color;
+  background: alpha(@success_color, 0.16);
 }
 
 .row-preview {
   color: @window_fg_color;
-  font-size: 16px;
+  font-size: 14px;
 }
 
 .row-meta {
   color: alpha(@window_fg_color, 0.68);
-  font-size: 13px;
+  font-size: 12px;
 }
 
-.entry-action {
-  min-height: 30px;
-  padding: 0 10px;
-  font-size: 12px;
+.pin-mark {
+  color: @success_color;
+}
+
+button.entry-action {
+  min-height: 26px;
+  min-width: 26px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+button.entry-action:hover {
+  background: alpha(@window_fg_color, 0.08);
 }
 
 .entry-actions {
@@ -270,30 +252,93 @@ window.quick-picker-window {
 }
 
 .history-footer {
-  margin-top: 4px;
+  padding-top: 10px;
+  border-top: 1px solid @borders;
+}
+
+.picker-header {
+  padding: 8px 12px 8px 16px;
+  border-bottom: 1px solid @borders;
+}
+
+.picker-list {
+  padding: 6px;
+}
+
+.picker-list .history-row.quick-selected,
+.picker-list .history-row:selected {
+  background: @yanklog_green;
+}
+
+.picker-list .history-row.quick-selected label,
+.picker-list .history-row:selected label,
+.picker-list .history-row.quick-selected image,
+.picker-list .history-row:selected image {
+  color: white;
+}
+
+.preview-pane {
+  background: alpha(@window_fg_color, 0.03);
+  border-left: 1px solid @borders;
+}
+
+.preview-pane textview,
+.preview-pane textview text {
+  background: transparent;
+}
+
+button.filter-toggle {
+  min-height: 24px;
+  padding: 0 10px;
+  font-size: 12px;
+  border: 0;
+  background: transparent;
+  color: alpha(@window_fg_color, 0.68);
+}
+
+button.filter-toggle:checked {
+  background: @view_bg_color;
+  color: @window_fg_color;
+  font-weight: 600;
+}
+
+.filter-box {
+  padding: 2px;
+  border-radius: 7px;
+  background: alpha(@window_fg_color, 0.06);
 }
 
 .empty-state {
   color: @window_fg_color;
-  font-size: 18px;
+  font-size: 16px;
   font-weight: 700;
+}
+
+.settings-card {
+  border-radius: 10px;
+  background: @view_bg_color;
+  border: 1px solid @borders;
+}
+
+.settings-row {
+  padding: 10px 14px;
 }
 
 .settings-panel {
   padding: 16px;
-  border-radius: 8px;
+  border-radius: 10px;
   background: @view_bg_color;
   border: 1px solid @borders;
 }
 
 .settings-note {
   color: alpha(@window_fg_color, 0.68);
-  font-size: 13px;
+  font-size: 12px;
 }
 
 .status-toast {
   color: @success_color;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
 }
 "#;
@@ -415,25 +460,30 @@ fn build_main_window(app: &adw::Application, present_window: bool) {
         }
     };
     let config = Arc::new(Mutex::new(Config::load(&profile).unwrap_or_default()));
-    let config_snapshot = config
+    let poll_interval_ms = config
         .lock()
-        .map(|config| config.clone())
-        .unwrap_or_default();
-    let monitor = ClipboardMonitor::new(config_snapshot.poll_interval_ms);
-    let pause_state = Arc::new(PauseState::default());
+        .map(|config| config.poll_interval_ms)
+        .unwrap_or(500);
+    let monitor = Arc::new(ClipboardMonitor::new(poll_interval_ms));
+    let pause_state = Arc::new(PauseState::load(profile.data_dir().join("pause-state")));
+    let secret_hint = Arc::new(SecretHint::default());
+    let history_revision = Arc::new(AtomicU64::new(0));
 
+    watch_clipboard_secret_hint(Arc::clone(&secret_hint));
     start_clipboard_monitor(
         Arc::clone(&database),
-        monitor,
-        config_snapshot,
+        Arc::clone(&monitor),
+        Arc::clone(&config),
         Arc::clone(&pause_state),
+        secret_hint,
+        Arc::clone(&history_revision),
     );
 
     let window = gtk::ApplicationWindow::builder()
         .application(app)
         .title(profile.display_name())
-        .default_width(940)
-        .default_height(760)
+        .default_width(780)
+        .default_height(720)
         .build();
 
     let header = adw::HeaderBar::new();
@@ -453,44 +503,30 @@ fn build_main_window(app: &adw::Application, present_window: bool) {
     title_label.set_xalign(0.0);
     title_label.add_css_class("app-title");
 
-    let monitoring_label = gtk::Label::new(Some("Monitoring clipboard"));
-    monitoring_label.set_xalign(0.0);
-    monitoring_label.add_css_class("monitoring");
+    let monitoring_label = gtk::Label::new(Some("Monitoring"));
+    monitoring_label.set_valign(gtk::Align::Center);
+    monitoring_label.add_css_class("status-pill");
 
-    let title_box = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    let title_box = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    title_box.set_hexpand(true);
     title_box.append(&title_label);
     title_box.append(&monitoring_label);
 
-    let action_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    let action_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     action_row.set_halign(gtk::Align::End);
     action_row.append(&pause_button);
     action_row.append(&pause_options_button);
     action_row.append(&settings_button);
 
     let content_header = gtk::Box::new(gtk::Orientation::Horizontal, 16);
-    content_header.add_css_class("content-header");
     content_header.append(&title_box);
     content_header.append(&action_row);
-    title_box.set_hexpand(true);
-
-    let privacy_title = gtk::Label::new(Some("Private local history"));
-    privacy_title.add_css_class("privacy-title");
-    let privacy_copy = gtk::Label::new(Some("Entries stay encrypted on this device."));
-    privacy_copy.add_css_class("muted");
-    let privacy_card = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-    privacy_card.add_css_class("privacy-card");
-    privacy_card.append(&privacy_title);
-    privacy_card.append(&privacy_copy);
 
     let action_status = gtk::Label::new(None);
     action_status.set_xalign(0.0);
     action_status.add_css_class("status-toast");
     let undo_button = gtk::Button::with_label("Undo");
-    undo_button.add_css_class("entry-action");
     undo_button.set_visible(false);
-    let status_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    status_row.append(&action_status);
-    status_row.append(&undo_button);
 
     let pause_popover = build_pause_popover(
         Arc::clone(&pause_state),
@@ -499,10 +535,11 @@ fn build_main_window(app: &adw::Application, present_window: bool) {
         &action_status,
     );
     pause_options_button.set_popover(Some(&pause_popover));
+    update_pause_ui(&pause_state, &pause_button, &monitoring_label);
 
     let result_label = gtk::Label::new(None);
     result_label.set_xalign(1.0);
-    result_label.add_css_class("muted");
+    result_label.add_css_class("footer-note");
     let search_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
     search_entry.set_hexpand(true);
     search_row.append(&search_entry);
@@ -512,10 +549,13 @@ fn build_main_window(app: &adw::Application, present_window: bool) {
     list.add_css_class("history-list");
     let scroller = gtk::ScrolledWindow::builder()
         .vexpand(true)
+        .hscrollbar_policy(gtk::PolicyType::Never)
         .child(&list)
         .build();
 
-    let clear_button = gtk::Button::with_label("Clear all");
+    let privacy_note = gtk::Label::new(Some("Encrypted on this device"));
+    privacy_note.add_css_class("footer-note");
+    let clear_button = gtk::Button::with_label("Clear all…");
     clear_button.add_css_class("destructive-action");
     let previous_button = gtk::Button::with_label("Previous");
     let next_button = gtk::Button::with_label("Next");
@@ -523,20 +563,21 @@ fn build_main_window(app: &adw::Application, present_window: bool) {
     footer_spacer.set_hexpand(true);
     let footer = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     footer.add_css_class("history-footer");
-    footer.append(&clear_button);
+    footer.append(&privacy_note);
+    footer.append(&action_status);
+    footer.append(&undo_button);
     footer.append(&footer_spacer);
+    footer.append(&clear_button);
     footer.append(&previous_button);
     footer.append(&next_button);
 
     let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
     content.add_css_class("app-root");
-    content.set_margin_top(28);
-    content.set_margin_bottom(28);
-    content.set_margin_start(28);
-    content.set_margin_end(28);
+    content.set_margin_top(12);
+    content.set_margin_bottom(16);
+    content.set_margin_start(20);
+    content.set_margin_end(20);
     content.append(&content_header);
-    content.append(&privacy_card);
-    content.append(&status_row);
     content.append(&search_row);
     content.append(&scroller);
     content.append(&footer);
@@ -547,6 +588,7 @@ fn build_main_window(app: &adw::Application, present_window: bool) {
     let state = Rc::new(AppState {
         database,
         config,
+        monitor,
         list,
         search_entry,
         status_label: action_status.clone(),
@@ -583,6 +625,20 @@ fn build_main_window(app: &adw::Application, present_window: bool) {
                     },
                 );
             });
+        });
+    }
+
+    {
+        // Show clips recorded by the monitor thread without waiting for a user action.
+        let state = Rc::clone(&state);
+        let seen_revision = Cell::new(history_revision.load(Ordering::SeqCst));
+        glib::timeout_add_local(Duration::from_millis(700), move || {
+            let revision = history_revision.load(Ordering::SeqCst);
+            if revision != seen_revision.get() {
+                seen_revision.set(revision);
+                refresh_with_current_query(&state);
+            }
+            glib::ControlFlow::Continue
         });
     }
 
@@ -868,11 +924,11 @@ fn onboarding_page(title: &str, body: &str) -> gtk::Box {
     let page = gtk::Box::new(gtk::Orientation::Vertical, 14);
     let title = gtk::Label::new(Some(title));
     title.set_xalign(0.0);
-    title.add_css_class("app-title");
+    title.add_css_class("page-title");
     let body = gtk::Label::new(Some(body));
     body.set_xalign(0.0);
     body.set_wrap(true);
-    body.add_css_class("settings-note");
+    body.add_css_class("muted");
     page.append(&title);
     page.append(&body);
     page
@@ -995,6 +1051,11 @@ fn update_pause_ui(
     let paused = pause_state.is_paused();
     pause_button.set_label(if paused { "Resume" } else { "Pause" });
     monitoring_label.set_text(&pause_state.monitoring_label());
+    if paused {
+        monitoring_label.add_css_class("paused");
+    } else {
+        monitoring_label.remove_css_class("paused");
+    }
 }
 
 fn setup_tray(
@@ -1784,6 +1845,7 @@ fn blend_icon_pixel(data: &mut [u8], size: i32, x: i32, y: i32, color: (u8, u8, 
 struct AppState {
     database: Arc<Mutex<Database>>,
     config: Arc<Mutex<Config>>,
+    monitor: Arc<ClipboardMonitor>,
     list: gtk::ListBox,
     search_entry: gtk::SearchEntry,
     status_label: gtk::Label,
@@ -1796,6 +1858,38 @@ struct AppState {
     undo_button: gtk::Button,
 }
 
+type HistoryPage = (Vec<yanklog_core::ClipboardEntry>, usize, usize);
+
+/// One page of history as `(entries, total, offset)`, with the offset clamped to the last page.
+fn load_history_page(state: &AppState, query: &str) -> Result<HistoryPage, String> {
+    let database = state
+        .database
+        .lock()
+        .map_err(|_| "the database is unavailable".to_string())?;
+    let total = if query.is_empty() {
+        database.count_entries()
+    } else {
+        database.count_search_history(query)
+    }
+    .map_err(|error| error.to_string())?;
+    let offset = if total == 0 {
+        0
+    } else {
+        state
+            .page_offset
+            .get()
+            .min(((total - 1) / HISTORY_PAGE_SIZE) * HISTORY_PAGE_SIZE)
+    };
+    state.page_offset.set(offset);
+    let entries = if query.is_empty() {
+        database.get_history_page(HISTORY_PAGE_SIZE, offset)
+    } else {
+        database.search_history_page(query, HISTORY_PAGE_SIZE, offset)
+    }
+    .map_err(|error| error.to_string())?;
+    Ok((entries, total, offset))
+}
+
 fn refresh_entries(state: &AppState, query: Option<String>) {
     while let Some(child) = state.list.first_child() {
         state.list.remove(&child);
@@ -1803,32 +1897,19 @@ fn refresh_entries(state: &AppState, query: Option<String>) {
 
     let query = query.unwrap_or_default();
     let query = query.trim();
-    let (entries, total, offset) = match state.database.lock() {
-        Ok(database) => {
-            let total = if query.is_empty() {
-                database.count_entries().unwrap_or_default()
-            } else {
-                database.count_search_history(query).unwrap_or_default()
-            };
-            let requested_offset = state.page_offset.get();
-            let offset = if total == 0 {
-                0
-            } else {
-                requested_offset.min(((total - 1) / HISTORY_PAGE_SIZE) * HISTORY_PAGE_SIZE)
-            };
-            state.page_offset.set(offset);
-            let entries = if query.is_empty() {
-                database
-                    .get_history_page(HISTORY_PAGE_SIZE, offset)
-                    .unwrap_or_default()
-            } else {
-                database
-                    .search_history_page(query, HISTORY_PAGE_SIZE, offset)
-                    .unwrap_or_default()
-            };
-            (entries, total, offset)
+    let (entries, total, offset) = match load_history_page(state, query) {
+        Ok(page) => page,
+        Err(error) => {
+            state.previous_button.set_sensitive(false);
+            state.next_button.set_sensitive(false);
+            state.result_label.set_text("");
+            append_empty_state(&state.list, "Clipboard history is unavailable", 120);
+            show_status(
+                &state.status_label,
+                &format!("Could not read history: {error}"),
+            );
+            return;
         }
-        Err(_) => (Vec::new(), 0, 0),
     };
 
     state.previous_button.set_sensitive(offset > 0);
@@ -1837,6 +1918,8 @@ fn refresh_entries(state: &AppState, query: Option<String>) {
         .set_sensitive(offset.saturating_add(entries.len()) < total);
     let result_text = if total == 0 {
         "0 items".to_string()
+    } else if total <= HISTORY_PAGE_SIZE {
+        format!("{total} item{}", if total == 1 { "" } else { "s" })
     } else {
         format!(
             "{}–{} of {}",
@@ -1848,123 +1931,171 @@ fn refresh_entries(state: &AppState, query: Option<String>) {
     state.result_label.set_text(&result_text);
 
     if entries.is_empty() {
-        let empty_message = if query.is_empty() {
-            "No clipboard history yet"
-        } else {
-            "No matching clipboard items"
-        };
-        let label = gtk::Label::new(Some(empty_message));
-        label.add_css_class("empty-state");
-        label.set_margin_top(120);
-        label.set_margin_bottom(120);
-        state.list.append(&label);
+        append_empty_state(
+            &state.list,
+            if query.is_empty() {
+                "No clipboard history yet"
+            } else {
+                "No matching clipboard items"
+            },
+            120,
+        );
         return;
     }
 
+    let today = chrono::Local::now().date_naive();
+    let preview_limit = state
+        .config
+        .lock()
+        .map(|config| config.max_preview_length)
+        .unwrap_or(160);
+    let mut current_section = "";
     for entry in entries {
-        let row = gtk::ListBoxRow::new();
-        row.add_css_class("history-row");
-        let row_box = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-        row_box.set_margin_top(14);
-        row_box.set_margin_bottom(14);
-        row_box.set_margin_start(16);
-        row_box.set_margin_end(16);
-
-        let text_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
-        text_box.set_hexpand(true);
-        let preview_text = state
-            .config
-            .lock()
-            .map(|config| {
-                let limit = config.max_preview_length.min(180);
-                truncate_preview(&entry.content, limit)
-            })
-            .unwrap_or_else(|_| entry.content.replace('\n', " "));
-        let preview = gtk::Label::new(Some(&preview_text));
-        preview.set_xalign(0.0);
-        preview.set_wrap(true);
-        preview.set_max_width_chars(90);
-        preview.set_lines(2);
-        preview.set_ellipsize(gtk::pango::EllipsizeMode::End);
-        preview.add_css_class("row-preview");
-        let meta = gtk::Label::new(Some(&format!(
-            "{}{}",
-            yanklog_core::format_timestamp(&entry.timestamp),
-            if entry.is_favorite { " · pinned" } else { "" }
-        )));
-        meta.set_xalign(0.0);
-        meta.add_css_class("row-meta");
-
-        text_box.append(&preview);
-        text_box.append(&meta);
-
-        let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        actions.add_css_class("entry-actions");
-        actions.set_valign(gtk::Align::Start);
-        let pin_button = gtk::Button::with_label(if entry.is_favorite { "Unpin" } else { "Pin" });
-        pin_button.add_css_class("entry-action");
-        let detail_button = gtk::Button::with_label("See more");
-        detail_button.add_css_class("entry-action");
-        let delete_button = gtk::Button::with_label("Delete");
-        delete_button.add_css_class("entry-action");
-        delete_button.add_css_class("destructive-action");
-
-        {
-            let action_state = state.clone_for_callbacks();
-            let entry_id = entry.id;
-            let was_favorite = entry.is_favorite;
-            pin_button.connect_clicked(move |_| {
-                if let Ok(database) = action_state.database.lock() {
-                    let _ = database.toggle_favorite(entry_id);
-                }
-                refresh_with_current_query(&action_state);
-                show_status(
-                    &action_state.status_label,
-                    if was_favorite {
-                        "Entry unpinned"
-                    } else {
-                        "Entry pinned"
-                    },
-                );
-            });
+        let section = section_title(entry.is_favorite, &entry.timestamp, today);
+        if section != current_section {
+            current_section = section;
+            state.list.append(&section_header_row(section));
         }
-
-        {
-            let action_state = state.clone_for_callbacks();
-            let entry = entry.clone();
-            detail_button.connect_clicked(move |_| {
-                show_entry_detail_window(&entry, action_state.clone_for_callbacks())
-            });
-        }
-
-        {
-            let action_state = state.clone_for_callbacks();
-            let deleted_entry = entry.clone();
-            delete_button.connect_clicked(move |_| {
-                delete_entry_with_undo(&action_state, deleted_entry.clone());
-            });
-        }
-
-        {
-            let content = entry.content.clone();
-            let status_label = state.status_label.clone();
-            let gesture = gtk::GestureClick::new();
-            gesture.connect_released(move |_, _, _, _| {
-                if copy_to_clipboard(&content).is_ok() {
-                    show_status(&status_label, "Copied to clipboard");
-                }
-            });
-            text_box.add_controller(gesture);
-        }
-
-        actions.append(&pin_button);
-        actions.append(&detail_button);
-        actions.append(&delete_button);
-        row_box.append(&text_box);
-        row_box.append(&actions);
-        row.set_child(Some(&row_box));
-        state.list.append(&row);
+        state
+            .list
+            .append(&history_row(state, &entry, preview_limit));
     }
+}
+
+fn append_empty_state(list: &gtk::ListBox, message: &str, margin: i32) {
+    let label = gtk::Label::new(Some(message));
+    label.add_css_class("empty-state");
+    label.set_margin_top(margin);
+    label.set_margin_bottom(margin);
+    list.append(&label);
+}
+
+fn section_header_row(title: &str) -> gtk::ListBoxRow {
+    let label = gtk::Label::new(Some(&title.to_uppercase()));
+    label.set_xalign(0.0);
+    label.set_margin_top(12);
+    label.set_margin_bottom(4);
+    label.set_margin_start(10);
+    label.add_css_class("section-title");
+    let row = gtk::ListBoxRow::new();
+    row.add_css_class("section-row");
+    row.set_selectable(false);
+    row.set_activatable(false);
+    row.set_child(Some(&label));
+    row
+}
+
+fn icon_action_button(icon_name: &str, tooltip: &str) -> gtk::Button {
+    let button = gtk::Button::from_icon_name(icon_name);
+    button.set_tooltip_text(Some(tooltip));
+    button.add_css_class("entry-action");
+    button
+}
+
+/// Copies an entry and tells the monitor, which would otherwise record the app's
+/// own copy as a new clipboard change.
+fn copy_entry_text(state: &AppState, content: &str) -> bool {
+    if copy_to_clipboard(content).is_err() {
+        return false;
+    }
+    state.monitor.update_last_content(content);
+    true
+}
+
+fn history_row(
+    state: &AppState,
+    entry: &yanklog_core::ClipboardEntry,
+    preview_limit: usize,
+) -> gtk::ListBoxRow {
+    let row = gtk::ListBoxRow::new();
+    row.add_css_class("history-row");
+    let row_box = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    row_box.set_margin_top(6);
+    row_box.set_margin_bottom(6);
+    row_box.set_margin_start(10);
+    row_box.set_margin_end(8);
+
+    let pin_mark = gtk::Image::from_icon_name("view-pin-symbolic");
+    pin_mark.add_css_class("pin-mark");
+    pin_mark.set_opacity(if entry.is_favorite { 1.0 } else { 0.0 });
+
+    let preview = gtk::Label::new(Some(&truncate_preview(&entry.content, preview_limit)));
+    preview.set_xalign(0.0);
+    preview.set_hexpand(true);
+    preview.set_single_line_mode(true);
+    preview.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    preview.add_css_class("row-preview");
+
+    let time = gtk::Label::new(Some(&yanklog_core::format_timestamp(&entry.timestamp)));
+    time.add_css_class("row-meta");
+
+    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+    actions.add_css_class("entry-actions");
+    actions.set_valign(gtk::Align::Center);
+    let pin_button = icon_action_button(
+        "view-pin-symbolic",
+        if entry.is_favorite { "Unpin" } else { "Pin" },
+    );
+    let detail_button = icon_action_button("view-reveal-symbolic", "Preview");
+    let delete_button = icon_action_button("user-trash-symbolic", "Delete");
+
+    {
+        let action_state = state.clone_for_callbacks();
+        let entry_id = entry.id;
+        let was_favorite = entry.is_favorite;
+        pin_button.connect_clicked(move |_| {
+            if let Ok(database) = action_state.database.lock() {
+                let _ = database.toggle_favorite(entry_id);
+            }
+            refresh_with_current_query(&action_state);
+            show_status(
+                &action_state.status_label,
+                if was_favorite {
+                    "Entry unpinned"
+                } else {
+                    "Entry pinned"
+                },
+            );
+        });
+    }
+
+    {
+        let action_state = state.clone_for_callbacks();
+        let entry = entry.clone();
+        detail_button.connect_clicked(move |_| {
+            show_entry_detail_window(&entry, action_state.clone_for_callbacks())
+        });
+    }
+
+    {
+        let action_state = state.clone_for_callbacks();
+        let deleted_entry = entry.clone();
+        delete_button.connect_clicked(move |_| {
+            delete_entry_with_undo(&action_state, deleted_entry.clone());
+        });
+    }
+
+    {
+        let action_state = state.clone_for_callbacks();
+        let content = entry.content.clone();
+        let gesture = gtk::GestureClick::new();
+        gesture.connect_released(move |_, _, _, _| {
+            if copy_entry_text(&action_state, &content) {
+                show_status(&action_state.status_label, "Copied to clipboard");
+            }
+        });
+        preview.add_controller(gesture);
+    }
+
+    actions.append(&pin_button);
+    actions.append(&detail_button);
+    actions.append(&delete_button);
+    row_box.append(&pin_mark);
+    row_box.append(&preview);
+    row_box.append(&time);
+    row_box.append(&actions);
+    row.set_child(Some(&row_box));
+    row
 }
 
 impl AppState {
@@ -1972,6 +2103,7 @@ impl AppState {
         Self {
             database: Arc::clone(&self.database),
             config: Arc::clone(&self.config),
+            monitor: Arc::clone(&self.monitor),
             list: self.list.clone(),
             search_entry: self.search_entry.clone(),
             status_label: self.status_label.clone(),
@@ -2048,7 +2180,7 @@ fn show_clear_history_confirmation(parent: &gtk::ApplicationWindow, state: AppSt
         .build();
     let title = gtk::Label::new(Some("Clear clipboard history?"));
     title.set_xalign(0.0);
-    title.add_css_class("privacy-title");
+    title.add_css_class("dialog-title");
     let message = gtk::Label::new(Some(&format!(
         "This affects {total} saved item{}. You can keep pinned items, but clearing cannot be undone.",
         if total == 1 { "" } else { "s" }
@@ -2136,51 +2268,57 @@ fn refresh_with_current_query(state: &AppState) {
 
 fn show_entry_detail_window(entry: &yanklog_core::ClipboardEntry, state: AppState) {
     let window = gtk::Window::builder()
-        .title("Clipboard entry")
+        .title("Preview")
         .default_width(620)
-        .default_height(520)
+        .default_height(500)
         .decorated(true)
         .build();
 
-    let title = gtk::Label::new(Some("Clipboard entry"));
+    let title = gtk::Label::new(Some("Preview"));
     title.set_xalign(0.0);
-    title.add_css_class("app-title");
+    title.add_css_class("dialog-title");
 
     let meta = gtk::Label::new(Some(&format!(
-        "{}{}",
+        "{} · {}{}",
         yanklog_core::format_timestamp(&entry.timestamp),
-        if entry.is_favorite { " · pinned" } else { "" }
+        content_summary(&entry.content),
+        if entry.is_favorite { " · Pinned" } else { "" }
     )));
     meta.set_xalign(0.0);
-    meta.add_css_class("muted");
+    meta.add_css_class("row-meta");
 
     let text = gtk::TextView::new();
     text.set_editable(false);
     text.set_monospace(true);
     text.set_wrap_mode(gtk::WrapMode::WordChar);
+    text.set_top_margin(12);
+    text.set_bottom_margin(12);
+    text.set_left_margin(14);
+    text.set_right_margin(14);
     text.buffer().set_text(&entry.content);
 
     let scroller = gtk::ScrolledWindow::builder()
         .vexpand(true)
         .child(&text)
         .build();
-    scroller.add_css_class("history-list");
+    scroller.add_css_class("settings-card");
 
     let copy_button = gtk::Button::with_label("Copy");
+    copy_button.add_css_class("suggested-action");
     let pin_button = gtk::Button::with_label(if entry.is_favorite { "Unpin" } else { "Pin" });
     let delete_button = gtk::Button::with_label("Delete");
     delete_button.add_css_class("destructive-action");
-    let close_button = gtk::Button::with_label("Close");
-    let detail_status = gtk::Label::new(None);
-    detail_status.set_xalign(0.0);
-    detail_status.add_css_class("status-toast");
+    let close_button = gtk::Button::with_label("Done");
 
     {
+        let state = state.clone_for_callbacks();
         let content = entry.content.clone();
-        let detail_status = detail_status.clone();
+        let window = window.clone();
         copy_button.connect_clicked(move |_| {
-            let _ = yanklog_core::copy_to_clipboard(&content);
-            show_status(&detail_status, "Copied");
+            if copy_entry_text(&state, &content) {
+                show_status(&state.status_label, "Copied to clipboard");
+            }
+            window.close();
         });
     }
 
@@ -2221,63 +2359,85 @@ fn show_entry_detail_window(entry: &yanklog_core::ClipboardEntry, state: AppStat
         close_button.connect_clicked(move |_| window.close());
     }
 
-    let action_row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    let action_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     spacer.set_hexpand(true);
-    action_row.append(&copy_button);
     action_row.append(&pin_button);
     action_row.append(&delete_button);
     action_row.append(&spacer);
     action_row.append(&close_button);
+    action_row.append(&copy_button);
+
+    let heading = gtk::Box::new(gtk::Orientation::Vertical, 3);
+    heading.append(&title);
+    heading.append(&meta);
 
     let content = gtk::Box::new(gtk::Orientation::Vertical, 14);
     content.add_css_class("app-root");
-    content.set_margin_top(16);
-    content.set_margin_bottom(24);
-    content.set_margin_start(24);
-    content.set_margin_end(24);
-    content.append(&title);
-    content.append(&meta);
+    content.set_margin_top(18);
+    content.set_margin_bottom(18);
+    content.set_margin_start(20);
+    content.set_margin_end(20);
+    content.append(&heading);
     content.append(&scroller);
-    content.append(&detail_status);
     content.append(&action_row);
 
     window.set_child(Some(&content));
     window.present();
 }
 
-fn truncate_preview(text: &str, max_chars: usize) -> String {
-    let text = text.replace('\n', " ").replace('\r', "");
-    let chars: Vec<char> = text.chars().collect();
-    if chars.len() <= max_chars {
-        return text;
-    }
-    let truncated: String = chars.into_iter().take(max_chars).collect();
-    format!("{truncated}...")
+/// Notes when the clipboard's owner marks its content as a secret. GDK reports
+/// clipboard changes on the main thread, so the capture thread reads the result.
+fn watch_clipboard_secret_hint(secret_hint: Arc<SecretHint>) {
+    let Some(display) = gtk::gdk::Display::default() else {
+        return;
+    };
+    display.clipboard().connect_changed(move |clipboard| {
+        if clipboard.formats().contain_mime_type(PASSWORD_MANAGER_HINT) {
+            secret_hint.mark();
+        }
+    });
 }
 
 fn start_clipboard_monitor(
     database: Arc<Mutex<Database>>,
-    monitor: ClipboardMonitor,
-    config: Config,
+    monitor: Arc<ClipboardMonitor>,
+    config: Arc<Mutex<Config>>,
     pause_state: Arc<PauseState>,
+    secret_hint: Arc<SecretHint>,
+    history_revision: Arc<AtomicU64>,
 ) {
     thread::spawn(move || loop {
+        // Read the settings on every pass so changes apply without a restart.
+        let config = config
+            .lock()
+            .map(|config| config.clone())
+            .unwrap_or_default();
+        let poll_interval = Duration::from_millis(config.poll_interval_ms.max(100));
+
         if pause_state.is_paused() {
-            thread::sleep(Duration::from_millis(500));
+            // Keep up with the clipboard so resuming never records an earlier copy.
+            monitor.mark_current_as_seen();
+            thread::sleep(poll_interval);
             continue;
         }
 
         if let Some(content) = monitor.check_for_changes() {
-            if !config.should_ignore_clipboard(&content) {
+            // Give the main thread a moment to report a password-manager hint for this change.
+            thread::sleep(Duration::from_millis(300));
+            if !secret_hint.is_recent() && !config.should_ignore_clipboard(&content) {
                 if let Ok(database) = database.lock() {
-                    let _ = database.insert_entry(&content, "text");
-                    let _ = database.prune_old_entries(config.max_history_size);
-                    let _ = database.clear_older_than_days(config.retention.max_age_days);
+                    if database.insert_entry(&content, "text").is_ok() {
+                        if config.max_history_size > 0 {
+                            let _ = database.prune_old_entries(config.max_history_size);
+                        }
+                        let _ = database.clear_older_than_days(config.retention.max_age_days);
+                        history_revision.fetch_add(1, Ordering::SeqCst);
+                    }
                 }
             }
         }
-        thread::sleep(Duration::from_millis(config.poll_interval_ms));
+        thread::sleep(poll_interval);
     });
 }
 
@@ -2304,6 +2464,7 @@ fn show_quick_picker_window(app: &adw::Application) {
         }
     };
     let entries = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let pinned_only = Rc::new(Cell::new(false));
 
     let window = gtk::ApplicationWindow::builder()
         .application(app)
@@ -2316,14 +2477,32 @@ fn show_quick_picker_window(app: &adw::Application) {
     window.set_resizable(false);
     window.set_size_request(QUICK_PICKER_WIDTH, QUICK_PICKER_HEIGHT);
     window.set_opacity(config.keybindings.quick_pick_opacity.clamp(0.4, 1.0));
+
     let search_entry = gtk::SearchEntry::builder()
         .placeholder_text("Search clipboard history")
         .build();
     search_entry.set_hexpand(true);
+    let all_toggle = gtk::ToggleButton::with_label("All");
+    all_toggle.add_css_class("filter-toggle");
+    all_toggle.set_focus_on_click(false);
+    all_toggle.set_active(true);
+    let pinned_toggle = gtk::ToggleButton::with_label("Pinned");
+    pinned_toggle.add_css_class("filter-toggle");
+    pinned_toggle.set_focus_on_click(false);
+    pinned_toggle.set_group(Some(&all_toggle));
+    let filter_box = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+    filter_box.add_css_class("filter-box");
+    filter_box.set_valign(gtk::Align::Center);
+    filter_box.append(&all_toggle);
+    filter_box.append(&pinned_toggle);
     let shortcut_help_button = gtk::Button::with_label("?");
     shortcut_help_button.set_tooltip_text(Some("Quick picker shortcut setup"));
+    shortcut_help_button.set_focus_on_click(false);
+    shortcut_help_button.set_valign(gtk::Align::Center);
+
     let list = gtk::ListBox::new();
     list.add_css_class("history-list");
+    list.add_css_class("picker-list");
     list.set_selection_mode(gtk::SelectionMode::Single);
     let scroller = gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never)
@@ -2331,13 +2510,75 @@ fn show_quick_picker_window(app: &adw::Application) {
         .vexpand(true)
         .child(&list)
         .build();
+    scroller.set_size_request(QUICK_PICKER_LIST_WIDTH, -1);
+
+    let preview_text = gtk::TextView::new();
+    preview_text.set_editable(false);
+    preview_text.set_cursor_visible(false);
+    preview_text.set_focusable(false);
+    preview_text.set_monospace(true);
+    preview_text.set_wrap_mode(gtk::WrapMode::WordChar);
+    preview_text.set_top_margin(14);
+    preview_text.set_bottom_margin(8);
+    preview_text.set_left_margin(16);
+    preview_text.set_right_margin(16);
+    let preview_scroller = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .vscrollbar_policy(gtk::PolicyType::Automatic)
+        .vexpand(true)
+        .hexpand(true)
+        .child(&preview_text)
+        .build();
+    let preview_meta = gtk::Label::new(None);
+    preview_meta.set_xalign(0.0);
+    preview_meta.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    preview_meta.set_margin_start(16);
+    preview_meta.set_margin_end(16);
+    preview_meta.set_margin_bottom(10);
+    preview_meta.add_css_class("row-meta");
+    let preview_pane = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    preview_pane.add_css_class("preview-pane");
+    preview_pane.set_hexpand(true);
+    preview_pane.append(&preview_scroller);
+    preview_pane.append(&preview_meta);
 
     {
         let app = app.clone();
         shortcut_help_button.connect_clicked(move |_| show_quick_picker_shortcut_help(&app));
     }
 
-    populate_quick_picker_rows(&list, &database, &config, &entries, "");
+    {
+        // The preview pane always shows the highlighted entry in full.
+        let entries = Rc::clone(&entries);
+        let preview_text = preview_text.clone();
+        let preview_meta = preview_meta.clone();
+        list.connect_row_selected(move |_, row| {
+            let entries = entries.borrow();
+            let entry: Option<&yanklog_core::ClipboardEntry> =
+                row.and_then(|row| entries.get(row.index() as usize));
+            match entry {
+                Some(entry) => {
+                    let excerpt: String = entry
+                        .content
+                        .chars()
+                        .take(QUICK_PICKER_PREVIEW_CHARS)
+                        .collect();
+                    preview_text.buffer().set_text(&excerpt);
+                    preview_meta.set_text(&format!(
+                        "{} · {}",
+                        yanklog_core::format_timestamp(&entry.timestamp),
+                        content_summary(&entry.content)
+                    ));
+                }
+                None => {
+                    preview_text.buffer().set_text("");
+                    preview_meta.set_text("");
+                }
+            }
+        });
+    }
+
+    populate_quick_picker_rows(&list, &database, &config, &entries, "", false);
     set_quick_picker_selection(&list, &scroller, 0);
 
     {
@@ -2346,6 +2587,7 @@ fn show_quick_picker_window(app: &adw::Application) {
         let database = Rc::clone(&database);
         let config = Rc::clone(&config);
         let entries = Rc::clone(&entries);
+        let pinned_only = Rc::clone(&pinned_only);
         let debounce = Rc::new(Cell::new(0_u64));
         search_entry.connect_search_changed(move |entry| {
             let generation = debounce.get().wrapping_add(1);
@@ -2356,14 +2598,44 @@ fn show_quick_picker_window(app: &adw::Application) {
             let database = Rc::clone(&database);
             let config = Rc::clone(&config);
             let entries = Rc::clone(&entries);
+            let pinned_only = Rc::clone(&pinned_only);
             let delayed_debounce = Rc::clone(&debounce);
             glib::timeout_add_local_once(Duration::from_millis(160), move || {
                 if delayed_debounce.get() != generation {
                     return;
                 }
-                populate_quick_picker_rows(&list, &database, &config, &entries, &query);
+                populate_quick_picker_rows(
+                    &list,
+                    &database,
+                    &config,
+                    &entries,
+                    &query,
+                    pinned_only.get(),
+                );
                 set_quick_picker_selection(&list, &scroller, 0);
             });
+        });
+    }
+
+    {
+        let list = list.clone();
+        let scroller = scroller.clone();
+        let database = Rc::clone(&database);
+        let config = Rc::clone(&config);
+        let entries = Rc::clone(&entries);
+        let pinned_only = Rc::clone(&pinned_only);
+        let search_entry = search_entry.clone();
+        pinned_toggle.connect_toggled(move |toggle| {
+            pinned_only.set(toggle.is_active());
+            populate_quick_picker_rows(
+                &list,
+                &database,
+                &config,
+                &entries,
+                &search_entry.text(),
+                pinned_only.get(),
+            );
+            set_quick_picker_selection(&list, &scroller, 0);
         });
     }
 
@@ -2388,6 +2660,9 @@ fn show_quick_picker_window(app: &adw::Application) {
         let database = Rc::clone(&database);
         let config = Rc::clone(&config);
         let search_entry = search_entry.clone();
+        let pinned_only = Rc::clone(&pinned_only);
+        let all_toggle = all_toggle.clone();
+        let pinned_toggle = pinned_toggle.clone();
         key_controller.connect_key_pressed(move |_, key, _, modifiers| {
             if modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK) {
                 if let Some(index) = key
@@ -2397,8 +2672,12 @@ fn show_quick_picker_window(app: &adw::Application) {
                     .map(|index| index as usize)
                 {
                     if index < 9 {
-                        if let Some(entry) = entries.borrow().get(index) {
-                            let _ = copy_to_clipboard(&entry.content);
+                        let content = entries
+                            .borrow()
+                            .get(index)
+                            .map(|entry| entry.content.clone());
+                        if let Some(content) = content {
+                            let _ = copy_to_clipboard(&content);
                             window.close();
                         }
                         return glib::Propagation::Stop;
@@ -2408,8 +2687,12 @@ fn show_quick_picker_window(app: &adw::Application) {
                 if key == gtk::gdk::Key::p {
                     if let Some(row) = list.selected_row() {
                         let selected = row.index();
-                        if let Some(entry) = entries.borrow().get(selected as usize) {
-                            let _ = database.toggle_favorite(entry.id);
+                        let selected_id = entries
+                            .borrow()
+                            .get(selected as usize)
+                            .map(|entry| entry.id);
+                        if let Some(id) = selected_id {
+                            let _ = database.toggle_favorite(id);
                         }
                         populate_quick_picker_rows(
                             &list,
@@ -2417,17 +2700,33 @@ fn show_quick_picker_window(app: &adw::Application) {
                             &config,
                             &entries,
                             &search_entry.text(),
+                            pinned_only.get(),
                         );
-                        set_quick_picker_selection(&list, &scroller, selected);
+                        // Pinning re-sorts the list; keep the highlight on the same entry.
+                        let moved_to = entries
+                            .borrow()
+                            .iter()
+                            .position(|entry| Some(entry.id) == selected_id)
+                            .map(|index| index as i32);
+                        let last = entries.borrow().len().saturating_sub(1) as i32;
+                        set_quick_picker_selection(
+                            &list,
+                            &scroller,
+                            moved_to.unwrap_or(selected.min(last)),
+                        );
                     }
                     return glib::Propagation::Stop;
                 }
 
-                if key == gtk::gdk::Key::Delete {
+                if key == gtk::gdk::Key::Delete || key == gtk::gdk::Key::BackSpace {
                     if let Some(row) = list.selected_row() {
                         let selected = row.index();
-                        if let Some(entry) = entries.borrow().get(selected as usize) {
-                            let _ = database.delete_entry(entry.id);
+                        let selected_id = entries
+                            .borrow()
+                            .get(selected as usize)
+                            .map(|entry| entry.id);
+                        if let Some(id) = selected_id {
+                            let _ = database.delete_entry(id);
                         }
                         populate_quick_picker_rows(
                             &list,
@@ -2435,10 +2734,23 @@ fn show_quick_picker_window(app: &adw::Application) {
                             &config,
                             &entries,
                             &search_entry.text(),
+                            pinned_only.get(),
                         );
                         let last = entries.borrow().len().saturating_sub(1) as i32;
                         set_quick_picker_selection(&list, &scroller, selected.min(last));
                     }
+                    return glib::Propagation::Stop;
+                }
+
+                // Vim-style movement needs Ctrl, so j and k can be typed in the search field.
+                if key == gtk::gdk::Key::j {
+                    let count = entries.borrow().len();
+                    move_quick_picker_selection(&list, &scroller, count, 1);
+                    return glib::Propagation::Stop;
+                }
+                if key == gtk::gdk::Key::k {
+                    let count = entries.borrow().len();
+                    move_quick_picker_selection(&list, &scroller, count, -1);
                     return glib::Propagation::Stop;
                 }
             }
@@ -2448,27 +2760,33 @@ fn show_quick_picker_window(app: &adw::Application) {
                     window.close();
                     glib::Propagation::Stop
                 }
+                gtk::gdk::Key::Tab => {
+                    if pinned_toggle.is_active() {
+                        all_toggle.set_active(true);
+                    } else {
+                        pinned_toggle.set_active(true);
+                    }
+                    glib::Propagation::Stop
+                }
                 gtk::gdk::Key::Down => {
-                    move_quick_picker_selection(&list, &scroller, entries.borrow().len(), 1);
+                    let count = entries.borrow().len();
+                    move_quick_picker_selection(&list, &scroller, count, 1);
                     glib::Propagation::Stop
                 }
                 gtk::gdk::Key::Up => {
-                    move_quick_picker_selection(&list, &scroller, entries.borrow().len(), -1);
-                    glib::Propagation::Stop
-                }
-                gtk::gdk::Key::j => {
-                    move_quick_picker_selection(&list, &scroller, entries.borrow().len(), 1);
-                    glib::Propagation::Stop
-                }
-                gtk::gdk::Key::k => {
-                    move_quick_picker_selection(&list, &scroller, entries.borrow().len(), -1);
+                    let count = entries.borrow().len();
+                    move_quick_picker_selection(&list, &scroller, count, -1);
                     glib::Propagation::Stop
                 }
                 gtk::gdk::Key::Return | gtk::gdk::Key::KP_Enter => {
-                    if let Some(row) = list.selected_row() {
-                        if let Some(entry) = entries.borrow().get(row.index() as usize) {
-                            let _ = yanklog_core::copy_to_clipboard(&entry.content);
-                        }
+                    let content = list.selected_row().and_then(|row| {
+                        entries
+                            .borrow()
+                            .get(row.index() as usize)
+                            .map(|entry| entry.content.clone())
+                    });
+                    if let Some(content) = content {
+                        let _ = yanklog_core::copy_to_clipboard(&content);
                     }
                     window.close();
                     glib::Propagation::Stop
@@ -2479,24 +2797,28 @@ fn show_quick_picker_window(app: &adw::Application) {
     }
     window.add_controller(key_controller);
 
-    let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
-    content.add_css_class("app-root");
-    content.add_css_class("quick-picker-root");
-    content.set_margin_top(16);
-    content.set_margin_bottom(16);
-    content.set_margin_start(16);
-    content.set_margin_end(16);
-    let search_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    search_row.append(&search_entry);
-    search_row.append(&shortcut_help_button);
+    let header_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    header_row.add_css_class("picker-header");
+    header_row.append(&search_entry);
+    header_row.append(&filter_box);
+    header_row.append(&shortcut_help_button);
+    let body = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    body.set_vexpand(true);
+    body.append(&scroller);
+    body.append(&preview_pane);
     let hint = gtk::Label::new(Some(
-        "↑/↓ Navigate   Enter Copy   Ctrl+1–9 Copy   Ctrl+P Pin   Ctrl+Delete Remove   Esc Close",
+        "Enter Copy   Ctrl+1–9 Copy directly   Ctrl+P Pin   Ctrl+Delete Remove   Tab All / Pinned   Esc Close",
     ));
     hint.set_xalign(0.0);
+    hint.set_ellipsize(gtk::pango::EllipsizeMode::End);
     hint.add_css_class("quick-picker-hint");
-    content.append(&search_row);
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    content.add_css_class("app-root");
+    content.add_css_class("quick-picker-root");
+    content.set_overflow(gtk::Overflow::Hidden);
+    content.append(&header_row);
+    content.append(&body);
     content.append(&hint);
-    content.append(&scroller);
     window.set_child(Some(&content));
     let has_been_active = Rc::new(std::cell::Cell::new(false));
     {
@@ -2583,59 +2905,74 @@ fn populate_quick_picker_rows(
     config: &Config,
     entries: &Rc<std::cell::RefCell<Vec<yanklog_core::ClipboardEntry>>>,
     query: &str,
+    pinned_only: bool,
 ) {
     while let Some(child) = list.first_child() {
         list.remove(&child);
     }
-    let limit = Some(config.keybindings.quick_pick_items.max(1));
-    let next_entries = if query.trim().is_empty() {
-        database.get_history(limit).unwrap_or_default()
+    let limit = config.keybindings.quick_pick_items.max(1);
+    let next_entries: Vec<yanklog_core::ClipboardEntry> = if query.trim().is_empty() {
+        database
+            .get_quick_pick_history(limit, pinned_only)
+            .unwrap_or_default()
+    } else if pinned_only {
+        database
+            .search_history(query, None)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|entry| entry.is_favorite)
+            .take(limit)
+            .collect()
     } else {
-        database.search_history(query, limit).unwrap_or_default()
+        database
+            .search_history(query, Some(limit))
+            .unwrap_or_default()
     };
     entries.replace(next_entries.clone());
 
     if next_entries.is_empty() {
-        let empty = gtk::Label::new(Some(if query.trim().is_empty() {
-            "No clipboard history yet"
-        } else {
-            "No matching clipboard items"
-        }));
-        empty.add_css_class("empty-state");
-        empty.set_margin_top(80);
-        empty.set_margin_bottom(80);
-        list.append(&empty);
+        append_empty_state(
+            list,
+            if !query.trim().is_empty() {
+                "No matching clips"
+            } else if pinned_only {
+                "No pinned clips"
+            } else {
+                "No clipboard history yet"
+            },
+            80,
+        );
         return;
     }
 
     for (index, entry) in next_entries.into_iter().enumerate() {
         let row = gtk::ListBoxRow::new();
         row.add_css_class("history-row");
-        let row_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
-        row_box.set_margin_top(10);
-        row_box.set_margin_bottom(10);
-        row_box.set_margin_start(14);
-        row_box.set_margin_end(14);
-        let label = gtk::Label::new(Some(&truncate_preview(&entry.content, 140)));
+        let row_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        row_box.set_margin_top(7);
+        row_box.set_margin_bottom(7);
+        row_box.set_margin_start(10);
+        row_box.set_margin_end(10);
+        if entry.is_favorite {
+            let pin_mark = gtk::Image::from_icon_name("view-pin-symbolic");
+            pin_mark.add_css_class("pin-mark");
+            row_box.append(&pin_mark);
+        }
+        let label = gtk::Label::new(Some(&truncate_preview(
+            &entry.content,
+            config.max_preview_length,
+        )));
         label.set_xalign(0.0);
-        label.set_wrap(true);
-        label.set_lines(2);
+        label.set_hexpand(true);
+        label.set_single_line_mode(true);
         label.set_ellipsize(gtk::pango::EllipsizeMode::End);
         label.add_css_class("row-preview");
-        let meta = gtk::Label::new(Some(&format!(
-            "{}{}{}",
-            yanklog_core::format_timestamp(&entry.timestamp),
-            if entry.is_favorite { " · Pinned" } else { "" },
-            if index < 9 {
-                format!(" · Ctrl+{}", index + 1)
-            } else {
-                String::new()
-            }
-        )));
-        meta.set_xalign(0.0);
-        meta.add_css_class("row-meta");
         row_box.append(&label);
-        row_box.append(&meta);
+        if index < 9 {
+            let shortcut = gtk::Label::new(Some(&format!("Ctrl+{}", index + 1)));
+            shortcut.add_css_class("row-meta");
+            row_box.append(&shortcut);
+        }
         row.set_child(Some(&row_box));
         list.append(&row);
     }
@@ -2644,126 +2981,154 @@ fn populate_quick_picker_rows(
 fn show_preferences_window(app: &adw::Application, profile: &Profile, state: Rc<AppState>) {
     let window = gtk::ApplicationWindow::builder()
         .application(app)
-        .title("Preferences")
-        .default_width(560)
+        .title("Settings")
+        .default_width(620)
         .default_height(640)
         .decorated(true)
         .resizable(true)
         .build();
-    window.set_size_request(480, 420);
+    window.set_size_request(520, 420);
     let shared_config = Arc::clone(&state.config);
     let config = shared_config
         .lock()
         .map(|config| config.clone())
         .unwrap_or_else(|_| Config::load(profile).unwrap_or_default());
 
-    let title = gtk::Label::new(Some("Settings"));
-    title.set_xalign(0.0);
-    title.add_css_class("app-title");
-
-    let profile_label = gtk::Label::new(Some(profile.display_name()));
-    profile_label.set_xalign(0.0);
-    profile_label.add_css_class("muted");
-
-    let title_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
-    title_box.append(&title);
-    title_box.append(&profile_label);
-
-    let general_panel = gtk::Box::new(gtk::Orientation::Vertical, 12);
-    general_panel.add_css_class("settings-panel");
-    let quick_pick_panel = gtk::Box::new(gtk::Orientation::Vertical, 12);
-    quick_pick_panel.add_css_class("settings-panel");
-    let privacy_panel = gtk::Box::new(gtk::Orientation::Vertical, 12);
-    privacy_panel.add_css_class("settings-panel");
-    let history_limit = spin_row(
-        "History limit",
-        1.0,
-        100_000.0,
-        config.max_history_size as f64,
-    );
-    let preview_length = spin_row(
-        "Preview length",
-        40.0,
-        2_000.0,
-        config.max_preview_length as f64,
-    );
-    let quick_pick_items = spin_row(
-        "Quick pick items",
-        1.0,
-        50.0,
-        config.keybindings.quick_pick_items as f64,
-    );
-    let quick_pick_opacity = float_spin_row(
-        "Quick pick opacity",
+    let history_limit = spin_control(1.0, 100_000.0, 100.0, config.max_history_size as f64);
+    let preview_length = spin_control(40.0, 2_000.0, 10.0, config.max_preview_length as f64);
+    let quick_pick_items = spin_control(1.0, 50.0, 1.0, config.keybindings.quick_pick_items as f64);
+    let quick_pick_opacity = spin_control(
         0.4,
         1.0,
-        config.keybindings.quick_pick_opacity.clamp(0.4, 1.0),
         0.05,
+        config.keybindings.quick_pick_opacity.clamp(0.4, 1.0),
     );
-    let theme_mode = theme_row(config.theme);
-    let retention_days = spin_row(
-        "Retention days",
-        0.0,
-        3650.0,
-        config.retention.max_age_days as f64,
-    );
-    let min_text_length = spin_row(
-        "Minimum text length",
-        0.0,
-        10_000.0,
-        config.privacy.min_text_length as f64,
-    );
-    let max_text_length = spin_row(
-        "Maximum text length",
+    quick_pick_opacity.set_digits(2);
+    let theme_mode = gtk::DropDown::from_strings(&["System", "Light", "Dark"]);
+    theme_mode.set_selected(theme_index(config.theme));
+    let retention_days = spin_control(0.0, 3650.0, 1.0, config.retention.max_age_days as f64);
+    let min_text_length = spin_control(0.0, 10_000.0, 1.0, config.privacy.min_text_length as f64);
+    let max_text_length = spin_control(
         0.0,
         1_000_000.0,
+        1_000.0,
         config.privacy.max_text_length as f64,
     );
-    let ignored_patterns = entry_row("Ignored patterns", &config.ignored_patterns_text());
-    let ignore_secret_like = gtk::CheckButton::with_label("Ignore secret-like values");
+    let ignored_patterns = gtk::Entry::new();
+    ignored_patterns.set_text(&config.ignored_patterns_text());
+    ignored_patterns.set_placeholder_text(Some("bank, private, scratch"));
+    let ignore_secret_like = gtk::Switch::new();
     ignore_secret_like.set_active(config.privacy.ignore_secret_like);
-    ignore_secret_like.add_css_class("row-preview");
-    let ignore_one_time_codes = gtk::CheckButton::with_label("Ignore one-time codes");
+    let ignore_one_time_codes = gtk::Switch::new();
     ignore_one_time_codes.set_active(config.privacy.ignore_one_time_codes);
-    ignore_one_time_codes.add_css_class("row-preview");
-    let launch_at_startup = gtk::CheckButton::with_label("Run at startup");
+    let launch_at_startup = gtk::Switch::new();
     launch_at_startup.set_active(config.launch_at_startup);
-    launch_at_startup.add_css_class("row-preview");
     let shortcut_help_button = gtk::Button::with_label("Shortcut setup");
-    shortcut_help_button.set_halign(gtk::Align::Start);
 
-    general_panel.append(&settings_note("Changes save automatically."));
-    general_panel.append(&history_limit.0);
-    general_panel.append(&preview_length.0);
-    general_panel.append(&theme_mode.0);
-    general_panel.append(&launch_at_startup);
-
-    quick_pick_panel.append(&info_row(
-        "Quick picker command",
-        &quick_picker_command_text(),
+    let general_page = gtk::Box::new(gtk::Orientation::Vertical, 18);
+    let (startup_section, startup_card) = settings_card("Startup");
+    startup_card.append(&settings_row(
+        &format!("Start {} at login", profile.display_name()),
+        Some("Starts quietly in the tray when you sign in."),
+        &launch_at_startup,
     ));
-    quick_pick_panel.append(&settings_note(
+    let (appearance_section, appearance_card) = settings_card("Appearance");
+    appearance_card.append(&settings_row("Theme", None, &theme_mode));
+    let (history_section, history_card) = settings_card("History");
+    history_card.append(&settings_row(
+        "History limit",
+        Some("Older unpinned items are removed first."),
+        &history_limit,
+    ));
+    history_card.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    history_card.append(&settings_row(
+        "Preview length",
+        Some("Characters kept for each row."),
+        &preview_length,
+    ));
+    history_card.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    history_card.append(&settings_row(
+        "Keep history",
+        Some("Days to keep unpinned items. 0 keeps them forever."),
+        &retention_days,
+    ));
+    general_page.append(&startup_section);
+    general_page.append(&appearance_section);
+    general_page.append(&history_section);
+
+    let quick_pick_page = gtk::Box::new(gtk::Orientation::Vertical, 18);
+    let (shortcut_section, shortcut_card) = settings_card("Keyboard shortcut");
+    let command_box = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    command_box.add_css_class("settings-row");
+    command_box.append(&info_row("Command", &quick_picker_command_text()));
+    command_box.append(&settings_note(
         "Bind this command in your desktop keyboard settings. Linux shortcut registration is handled by the desktop environment, so GNOME, KDE, Xfce, and other distros expose it in different places.",
     ));
-    quick_pick_panel.append(&shortcut_help_button);
-    quick_pick_panel.append(&quick_pick_items.0);
-    quick_pick_panel.append(&quick_pick_opacity.0);
+    shortcut_help_button.set_halign(gtk::Align::Start);
+    command_box.append(&shortcut_help_button);
+    shortcut_card.append(&command_box);
+    let (picker_section, picker_card) = settings_card("Window");
+    picker_card.append(&settings_row(
+        "Visible items",
+        Some("Pinned clips take at most half the list."),
+        &quick_pick_items,
+    ));
+    picker_card.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    picker_card.append(&settings_row("Opacity", None, &quick_pick_opacity));
+    quick_pick_page.append(&shortcut_section);
+    quick_pick_page.append(&picker_section);
 
-    privacy_panel.append(&retention_days.0);
-    privacy_panel.append(&min_text_length.0);
-    privacy_panel.append(&max_text_length.0);
-    privacy_panel.append(&ignored_patterns.0);
-    privacy_panel.append(&ignore_secret_like);
-    privacy_panel.append(&ignore_one_time_codes);
+    let privacy_page = gtk::Box::new(gtk::Orientation::Vertical, 18);
+    let (never_section, never_card) = settings_card("Never record");
+    never_card.append(&settings_row(
+        "Secret-like values",
+        Some("Passwords, API keys and private tokens."),
+        &ignore_secret_like,
+    ));
+    never_card.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    never_card.append(&settings_row(
+        "One-time codes",
+        Some("Short numeric verification codes."),
+        &ignore_one_time_codes,
+    ));
+    let (rules_section, rules_card) = settings_card("Text rules");
+    rules_card.append(&settings_row(
+        "Minimum length",
+        Some("Characters."),
+        &min_text_length,
+    ));
+    rules_card.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    rules_card.append(&settings_row(
+        "Maximum length",
+        Some("Characters. 0 means no limit."),
+        &max_text_length,
+    ));
+    rules_card.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    let ignored_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    ignored_box.add_css_class("settings-row");
+    let ignored_title = gtk::Label::new(Some("Ignored words"));
+    ignored_title.set_xalign(0.0);
+    ignored_box.append(&ignored_title);
+    ignored_box.append(&ignored_patterns);
+    ignored_box.append(&settings_note(
+        "Separate words with commas. Anything you copy that contains one of them is skipped.",
+    ));
+    rules_card.append(&ignored_box);
+    privacy_page.append(&never_section);
+    privacy_page.append(&rules_section);
 
     let preferences_status = gtk::Label::new(None);
-    preferences_status.set_xalign(0.0);
+    preferences_status.set_xalign(1.0);
+    preferences_status.set_hexpand(true);
     preferences_status.add_css_class("status-toast");
     let storage = storage_panel(&window, profile, &preferences_status, Rc::clone(&state));
-    let about_panel = gtk::Box::new(gtk::Orientation::Vertical, 12);
-    about_panel.add_css_class("settings-panel");
-    about_panel.append(&info_row("Version", APP_VERSION));
-    about_panel.append(&info_row(
+
+    let about_page = gtk::Box::new(gtk::Orientation::Vertical, 18);
+    let (about_section, about_card) = settings_card("About");
+    let about_box = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    about_box.add_css_class("settings-row");
+    about_box.append(&info_row("Version", APP_VERSION));
+    about_box.append(&info_row(
         "Distribution",
         if is_flatpak_build() {
             "Flatpak"
@@ -2771,32 +3136,38 @@ fn show_preferences_window(app: &adw::Application, profile: &Profile, state: Rc<
             "Linux direct install / AppImage"
         },
     ));
-    about_panel.append(&settings_note(
+    about_card.append(&about_box);
+    about_page.append(&about_section);
+    about_page.append(&settings_note(
         "YankLog keeps clipboard content on this device and does not transmit your history.",
     ));
 
     let stack = gtk::Stack::new();
     stack.set_transition_type(gtk::StackTransitionType::Crossfade);
     stack.set_vexpand(true);
-    stack.add_titled(&general_panel, Some("general"), "General");
-    stack.add_titled(&quick_pick_panel, Some("quick-pick"), "Quick Pick");
-    stack.add_titled(&privacy_panel, Some("privacy"), "Privacy");
+    stack.set_vhomogeneous(false);
+    stack.add_titled(&general_page, Some("general"), "General");
+    stack.add_titled(&quick_pick_page, Some("quick-pick"), "Quick Pick");
+    stack.add_titled(&privacy_page, Some("privacy"), "Privacy");
     stack.add_titled(&storage, Some("storage"), "Storage");
-    stack.add_titled(&about_panel, Some("about"), "About");
+    stack.add_titled(&about_page, Some("about"), "About");
     let switcher = gtk::StackSwitcher::new();
     switcher.set_stack(Some(&stack));
     switcher.set_halign(gtk::Align::Center);
 
+    let footer = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    footer.append(&settings_note("Changes save automatically"));
+    footer.append(&preferences_status);
+
     let content = gtk::Box::new(gtk::Orientation::Vertical, 18);
     content.add_css_class("app-root");
-    content.set_margin_top(12);
-    content.set_margin_bottom(24);
-    content.set_margin_start(24);
-    content.set_margin_end(24);
-    content.append(&title_box);
+    content.set_margin_top(14);
+    content.set_margin_bottom(18);
+    content.set_margin_start(28);
+    content.set_margin_end(28);
     content.append(&switcher);
     content.append(&stack);
-    content.append(&preferences_status);
+    content.append(&footer);
 
     {
         let app = app.clone();
@@ -2804,15 +3175,15 @@ fn show_preferences_window(app: &adw::Application, profile: &Profile, state: Rc<
     }
 
     let controls = SettingsControls {
-        history_limit: history_limit.1,
-        preview_length: preview_length.1,
-        quick_pick_items: quick_pick_items.1,
-        quick_pick_opacity: quick_pick_opacity.1,
-        theme_mode: theme_mode.1,
-        retention_days: retention_days.1,
-        min_text_length: min_text_length.1,
-        max_text_length: max_text_length.1,
-        ignored_patterns: ignored_patterns.1,
+        history_limit,
+        preview_length,
+        quick_pick_items,
+        quick_pick_opacity,
+        theme_mode,
+        retention_days,
+        min_text_length,
+        max_text_length,
+        ignored_patterns,
         ignore_secret_like,
         ignore_one_time_codes,
         launch_at_startup,
@@ -2840,9 +3211,9 @@ struct SettingsControls {
     min_text_length: gtk::SpinButton,
     max_text_length: gtk::SpinButton,
     ignored_patterns: gtk::Entry,
-    ignore_secret_like: gtk::CheckButton,
-    ignore_one_time_codes: gtk::CheckButton,
-    launch_at_startup: gtk::CheckButton,
+    ignore_secret_like: gtk::Switch,
+    ignore_one_time_codes: gtk::Switch,
+    launch_at_startup: gtk::Switch,
 }
 
 fn connect_auto_save_controls(
@@ -2873,9 +3244,9 @@ fn connect_auto_save_controls(
     connect_save!(controls.min_text_length, connect_value_changed);
     connect_save!(controls.max_text_length, connect_value_changed);
     connect_save!(controls.ignored_patterns, connect_changed);
-    connect_save!(controls.ignore_secret_like, connect_toggled);
-    connect_save!(controls.ignore_one_time_codes, connect_toggled);
-    connect_save!(controls.launch_at_startup, connect_toggled);
+    connect_save!(controls.ignore_secret_like, connect_active_notify);
+    connect_save!(controls.ignore_one_time_codes, connect_active_notify);
+    connect_save!(controls.launch_at_startup, connect_active_notify);
 }
 
 fn save_preferences(
@@ -2963,41 +3334,48 @@ fn settings_row_label(label: &str) -> gtk::Label {
     label_widget
 }
 
-fn spin_row(label: &str, min: f64, max: f64, value: f64) -> (gtk::Box, gtk::SpinButton) {
-    let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-    let input = gtk::SpinButton::with_range(min, max, 1.0);
-    input.set_value(value);
-    input.set_hexpand(true);
-    row.append(&settings_row_label(label));
-    row.append(&input);
-    (row, input)
-}
-
-fn float_spin_row(
-    label: &str,
-    min: f64,
-    max: f64,
-    value: f64,
-    step: f64,
-) -> (gtk::Box, gtk::SpinButton) {
-    let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+fn spin_control(min: f64, max: f64, step: f64, value: f64) -> gtk::SpinButton {
     let input = gtk::SpinButton::with_range(min, max, step);
-    input.set_digits(2);
     input.set_value(value);
-    input.set_hexpand(true);
-    row.append(&settings_row_label(label));
-    row.append(&input);
-    (row, input)
+    input.set_width_chars(8);
+    input
 }
 
-fn theme_row(value: ThemePreference) -> (gtk::Box, gtk::DropDown) {
-    let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-    let input = gtk::DropDown::from_strings(&["System", "Light", "Dark"]);
-    input.set_selected(theme_index(value));
-    input.set_hexpand(true);
-    row.append(&settings_row_label("Appearance"));
-    row.append(&input);
-    (row, input)
+/// A titled group: returns the whole section and the card that rows are appended to.
+fn settings_card(title: &str) -> (gtk::Box, gtk::Box) {
+    let heading = gtk::Label::new(Some(&title.to_uppercase()));
+    heading.set_xalign(0.0);
+    heading.set_margin_start(4);
+    heading.add_css_class("section-title");
+    let card = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    card.add_css_class("settings-card");
+    let section = gtk::Box::new(gtk::Orientation::Vertical, 7);
+    section.append(&heading);
+    section.append(&card);
+    (section, card)
+}
+
+/// One setting: its name and optional explanation on the left, its control on the right.
+fn settings_row(
+    title: &str,
+    detail: Option<&str>,
+    control: &impl glib::object::IsA<gtk::Widget>,
+) -> gtk::Box {
+    let title_label = gtk::Label::new(Some(title));
+    title_label.set_xalign(0.0);
+    let text = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    text.set_hexpand(true);
+    text.set_valign(gtk::Align::Center);
+    text.append(&title_label);
+    if let Some(detail) = detail {
+        text.append(&settings_note(detail));
+    }
+    control.set_valign(gtk::Align::Center);
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 16);
+    row.add_css_class("settings-row");
+    row.append(&text);
+    row.append(control);
+    row
 }
 
 fn theme_index(value: ThemePreference) -> u32 {
@@ -3014,16 +3392,6 @@ fn theme_from_index(index: u32) -> ThemePreference {
         2 => ThemePreference::Dark,
         _ => ThemePreference::System,
     }
-}
-
-fn entry_row(label: &str, value: &str) -> (gtk::Box, gtk::Entry) {
-    let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-    let input = gtk::Entry::new();
-    input.set_text(value);
-    input.set_hexpand(true);
-    row.append(&settings_row_label(label));
-    row.append(&input);
-    (row, input)
 }
 
 fn info_row(label: &str, value: &str) -> gtk::Box {
@@ -3053,12 +3421,7 @@ fn storage_panel(
     let database_path = profile.data_dir().join("history.db");
     let database_path_text = database_path.to_string_lossy().to_string();
 
-    let panel = gtk::Box::new(gtk::Orientation::Vertical, 10);
-    panel.add_css_class("settings-panel");
-
-    let title = gtk::Label::new(Some("Storage"));
-    title.set_xalign(0.0);
-    title.add_css_class("privacy-title");
+    let panel = gtk::Box::new(gtk::Orientation::Vertical, 18);
 
     let key_storage = if profile.data_dir().join("secret.key").exists() {
         "Protected local file (Secret Service unavailable)"
@@ -3075,11 +3438,12 @@ fn storage_panel(
     let reveal_button = gtk::Button::with_label("Reveal in Files");
     let export_button = gtk::Button::with_label("Export Backup");
     let import_button = gtk::Button::with_label("Restore Backup");
-    let action_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-    action_row.append(&copy_button);
-    action_row.append(&reveal_button);
-    action_row.append(&export_button);
-    action_row.append(&import_button);
+    let path_actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    path_actions.append(&copy_button);
+    path_actions.append(&reveal_button);
+    let backup_actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    backup_actions.append(&export_button);
+    backup_actions.append(&import_button);
 
     {
         let database_path_text = database_path_text.clone();
@@ -3177,11 +3541,23 @@ fn storage_panel(
         });
     }
 
-    panel.append(&title);
-    panel.append(&note);
-    panel.append(&path_row);
-    panel.append(&key_row);
-    panel.append(&action_row);
+    let (history_section, history_card) = settings_card("Encrypted history");
+    let history_box = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    history_box.add_css_class("settings-row");
+    history_box.append(&path_row);
+    history_box.append(&key_row);
+    history_box.append(&path_actions);
+    history_card.append(&history_box);
+
+    let (backup_section, backup_card) = settings_card("Portable backup");
+    let backup_box = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    backup_box.add_css_class("settings-row");
+    backup_box.append(&note);
+    backup_box.append(&backup_actions);
+    backup_card.append(&backup_box);
+
+    panel.append(&history_section);
+    panel.append(&backup_section);
     panel
 }
 
@@ -3200,7 +3576,7 @@ fn show_export_backup_dialog(
         .build();
     let title = gtk::Label::new(Some("Protect your backup"));
     title.set_xalign(0.0);
-    title.add_css_class("privacy-title");
+    title.add_css_class("dialog-title");
     let scope = gtk::DropDown::from_strings(&["All history", "Pinned only"]);
     let password = gtk::PasswordEntry::new();
     password.set_placeholder_text(Some("Password (at least 8 characters)"));
@@ -3298,7 +3674,7 @@ fn show_import_backup_dialog(
         .build();
     let title = gtk::Label::new(Some("Restore encrypted backup"));
     title.set_xalign(0.0);
-    title.add_css_class("privacy-title");
+    title.add_css_class("dialog-title");
     let note = settings_note(
         "Existing matching items are updated; other history remains untouched. Pinned state and timestamps are preserved.",
     );
@@ -3572,7 +3948,7 @@ fn instruction_section(name: &str, body: &str) -> gtk::Box {
     let section = gtk::Box::new(gtk::Orientation::Vertical, 4);
     let title = gtk::Label::new(Some(name));
     title.set_xalign(0.0);
-    title.add_css_class("privacy-title");
+    title.add_css_class("dialog-title");
     let copy = settings_note(body);
     section.append(&title);
     section.append(&copy);
