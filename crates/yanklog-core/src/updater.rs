@@ -5,6 +5,9 @@ use std::process::{Command, Stdio};
 
 use crate::profile::{Platform, Profile};
 
+const DEFAULT_GITHUB_REPO: &str = "thisiseesmaeel/yanklog-linux";
+const DEFAULT_MACOS_BASE_URL: &str = "https://downloads.yanklog.com/macos";
+
 pub fn check_for_update(
     profile: &Profile,
     current_version: &str,
@@ -13,16 +16,26 @@ pub fn check_for_update(
         return Ok(None);
     }
 
-    let repo = env::var("YANKLOG_GITHUB_REPO")
-        .unwrap_or_else(|_| "thisiseesmaeel/yanklog-linux".to_string());
-    let url = format!("https://api.github.com/repos/{repo}/releases/latest");
-    let json = download_text(&url)?;
-    let parsed: serde_json::Value = serde_json::from_str(&json)
-        .map_err(|e| format!("Failed to parse release info: {e}"))?;
-    let tag = parsed["tag_name"]
-        .as_str()
-        .ok_or_else(|| "No tag_name in release response".to_string())?;
-    let latest_version = sanitize_version(tag)?;
+    // Linux releases are published on GitHub; macOS direct builds on the downloads server.
+    let latest_version = match profile.platform {
+        Platform::Linux => {
+            let url = format!(
+                "https://api.github.com/repos/{}/releases/latest",
+                github_repo()
+            );
+            let json = download_text(&url)?;
+            let parsed: serde_json::Value = serde_json::from_str(&json)
+                .map_err(|e| format!("Failed to parse release info: {e}"))?;
+            let tag = parsed["tag_name"]
+                .as_str()
+                .ok_or_else(|| "No tag_name in release response".to_string())?;
+            sanitize_version(tag)?
+        }
+        Platform::MacOS => {
+            let url = format!("{}/latest-macos-version.txt", macos_base_url());
+            sanitize_version(&download_text(&url)?)?
+        }
+    };
 
     if is_newer_version(&latest_version, current_version) {
         Ok(Some(latest_version))
@@ -31,12 +44,24 @@ pub fn check_for_update(
     }
 }
 
-pub fn release_notes(_profile: &Profile, version: &str) -> Result<Option<String>, String> {
+pub fn release_notes(profile: &Profile, version: &str) -> Result<Option<String>, String> {
     let version = sanitize_version(version)?;
-    let repo = env::var("YANKLOG_GITHUB_REPO")
-        .unwrap_or_else(|_| "thisiseesmaeel/yanklog-linux".to_string());
+    match profile.platform {
+        Platform::Linux => github_release_notes(&version),
+        Platform::MacOS => {
+            let url = format!("{}/release-notes-{}.txt", macos_base_url(), version);
+            match download_text(&url) {
+                Ok(notes) if !notes.trim().is_empty() => Ok(Some(notes.trim().to_string())),
+                Ok(_) | Err(_) => Ok(None),
+            }
+        }
+    }
+}
+
+fn github_release_notes(version: &str) -> Result<Option<String>, String> {
     let url = format!(
-        "https://api.github.com/repos/{repo}/releases/tags/v{version}"
+        "https://api.github.com/repos/{}/releases/tags/v{version}",
+        github_repo()
     );
     match download_text(&url) {
         Ok(json) => {
@@ -55,6 +80,21 @@ pub fn release_notes(_profile: &Profile, version: &str) -> Result<Option<String>
             }
         }
         Err(_) => Ok(None),
+    }
+}
+
+fn github_repo() -> String {
+    env::var("YANKLOG_GITHUB_REPO").unwrap_or_else(|_| DEFAULT_GITHUB_REPO.to_string())
+}
+
+/// Matches the base URL the macOS installer script downloads from.
+fn macos_base_url() -> String {
+    if let Ok(base_url) = env::var("YANKLOG_MACOS_BASE_URL") {
+        return base_url.trim_end_matches('/').to_string();
+    }
+    match env::var("YANKLOG_DOWNLOADS_ROOT_URL") {
+        Ok(root) => format!("{}/macos", root.trim_end_matches('/')),
+        Err(_) => DEFAULT_MACOS_BASE_URL.to_string(),
     }
 }
 
