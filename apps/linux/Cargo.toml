@@ -24,6 +24,5 @@ async-io = "2.6"
 chrono = "0.4"
 gtk = { package = "gtk4", version = "0.11" }
 ctrlc = "3.5"
-fs2 = "0.4"
 keyring = { version = "3.6.3", default-features = false, features = ["sync-secret-service", "vendored"] }
 ksni = { version = "0.3", default-features = false, features = ["async-io", "blocking"] }

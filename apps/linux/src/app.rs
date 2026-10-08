@@ -1,11 +1,8 @@
 use adw::prelude::*;
 use ashpd::desktop::background::Background;
-use fs2::FileExt as FsFileExt;
 use gtk::glib;
 use ksni::blocking::TrayMethods;
 use std::cell::{Cell, RefCell};
-use std::fs::OpenOptions;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::rc::Rc;
@@ -320,116 +317,17 @@ pub fn run() {
         return;
     }
 
-    let profile = profile();
-    let config = Config::load(&profile).unwrap_or_default();
-
-    if start_background {
-        run_background_mode(&profile, config);
-        return;
-    }
-
     let application = adw::Application::builder().application_id(app_id()).build();
     application.connect_activate(move |app| {
         install_css();
-        apply_theme(&Config::load(&profile).unwrap_or_default());
+        apply_theme(&Config::load(&profile()).unwrap_or_default());
+        if let Some(window) = app.windows().first() {
+            window.present();
+            return;
+        }
         build_main_window(app, !start_hidden);
     });
     application.run();
-}
-
-fn run_background_mode(profile: &Profile, config: Config) {
-    let lock_path = profile.data_dir().join("background.lock");
-    let _ = std::fs::create_dir_all(lock_path.parent().unwrap());
-    let mut background_lock = match OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .open(&lock_path)
-    {
-        Ok(file) => file,
-        Err(error) => {
-            eprintln!("Failed to open YankLog background lock: {error}");
-            std::process::exit(1);
-        }
-    };
-    match background_lock.try_lock_exclusive() {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-            // Another YankLog background process owns the lock. This can happen when
-            // GNOME restores the session as well as processing the autostart entry.
-            std::process::exit(0);
-        }
-        Err(error) => {
-            eprintln!("Failed to lock YankLog background process: {error}");
-            std::process::exit(1);
-        }
-    }
-    let _ = background_lock.set_len(0);
-    let _ = write!(background_lock, "{}", std::process::id());
-
-    let database = match open_database_with_secure_key(profile) {
-        Ok(database) => Arc::new(Mutex::new(database)),
-        Err(err) => {
-            eprintln!("Failed to open yanklog database: {err}");
-            std::process::exit(1);
-        }
-    };
-    let pause_state = Arc::new(PauseState::default());
-    let monitor = ClipboardMonitor::new(config.poll_interval_ms);
-
-    start_clipboard_monitor(
-        Arc::clone(&database),
-        monitor,
-        config,
-        Arc::clone(&pause_state),
-    );
-
-    let (sender, receiver) = mpsc::channel();
-    let tray = YanklogTray {
-        sender,
-        update_available: None,
-        pause_state: Arc::clone(&pause_state),
-    };
-    let Ok(handle) = tray
-        .assume_sni_available(true)
-        .disable_dbus_name(is_flatpak_build())
-        .spawn()
-    else {
-        std::thread::park();
-        return;
-    };
-    let tray_handle = handle.clone();
-    std::mem::forget(handle);
-
-    loop {
-        while let Ok(command) = receiver.try_recv() {
-            match command {
-                TrayCommand::Show => {
-                    let _ = Command::new(std::env::current_exe().unwrap()).spawn();
-                }
-                TrayCommand::QuickPick => {
-                    let _ = Command::new(std::env::current_exe().unwrap())
-                        .arg("--pick")
-                        .spawn();
-                }
-                TrayCommand::PauseFor(seconds) => {
-                    pause_state.pause(seconds.map(Duration::from_secs));
-                    let _ = tray_handle.update(|_| {});
-                }
-                TrayCommand::PauseUntilTomorrow => {
-                    pause_state.pause(pause_until_tomorrow_duration());
-                    let _ = tray_handle.update(|_| {});
-                }
-                TrayCommand::Resume => {
-                    pause_state.resume();
-                    let _ = tray_handle.update(|_| {});
-                }
-                TrayCommand::CheckUpdate | TrayCommand::Settings => {}
-                TrayCommand::Quit => std::process::exit(0),
-            }
-        }
-        thread::sleep(Duration::from_millis(200));
-    }
 }
 
 fn install_css() {
