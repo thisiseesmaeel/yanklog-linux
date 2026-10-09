@@ -293,6 +293,13 @@ impl Database {
         Ok(deleted)
     }
 
+    /// A counter SQLite bumps whenever another connection commits a change to the
+    /// file, such as Quick Pick running in its own process.
+    pub fn data_version(&self) -> Result<i64> {
+        self.conn
+            .query_row("PRAGMA data_version", [], |row| row.get(0))
+    }
+
     pub fn count_entries(&self) -> Result<usize> {
         let count: i64 =
             self.conn
@@ -451,6 +458,28 @@ mod tests {
         assert_eq!(only_pins.len(), 4);
 
         drop(db);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn data_version_reports_changes_from_other_connections() {
+        let dir =
+            std::env::temp_dir().join(format!("yanklog-core-version-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let main = Database::open_at(dir.clone()).unwrap();
+        let other = Database::open_at(dir.clone()).unwrap();
+
+        let before = main.data_version().unwrap();
+        main.insert_entry("from this connection", "text").unwrap();
+        assert_eq!(main.data_version().unwrap(), before);
+
+        other
+            .insert_entry("from another connection", "text")
+            .unwrap();
+        assert_ne!(main.data_version().unwrap(), before);
+
+        drop(main);
+        drop(other);
         let _ = std::fs::remove_dir_all(dir);
     }
 
