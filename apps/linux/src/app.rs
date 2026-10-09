@@ -1218,15 +1218,22 @@ fn show_update_status_window(app: &adw::Application) {
     let update_window = gtk::ApplicationWindow::builder()
         .application(app)
         .title("Check for update")
-        .default_width(460)
-        .default_height(320)
         .decorated(true)
+        // A fixed-size window follows its content, growing only when release notes
+        // and the install buttons appear.
+        .resizable(false)
         .build();
+
+    let title = gtk::Label::new(Some("Software Update"));
+    title.set_xalign(0.0);
+    title.add_css_class("dialog-title");
 
     let status = gtk::Label::new(Some("Checking for update..."));
     status.set_xalign(0.0);
     status.set_wrap(true);
-    status.add_css_class("title-4");
+    status.set_width_chars(40);
+    status.set_max_width_chars(46);
+    status.add_css_class("muted");
 
     let release_notes = gtk::Label::new(None);
     release_notes.set_xalign(0.0);
@@ -1234,14 +1241,22 @@ fn show_update_status_window(app: &adw::Application) {
     release_notes.set_wrap(true);
     release_notes.set_selectable(true);
     release_notes.set_width_chars(40);
+    release_notes.set_max_width_chars(46);
+    release_notes.set_margin_top(10);
+    release_notes.set_margin_bottom(10);
+    release_notes.set_margin_start(12);
+    release_notes.set_margin_end(12);
     let notes_scroller = gtk::ScrolledWindow::builder()
-        .vexpand(true)
-        .hexpand(true)
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .min_content_height(130)
+        .max_content_height(130)
         .child(&release_notes)
         .build();
+    notes_scroller.add_css_class("settings-card");
     notes_scroller.set_visible(false);
 
     let install_button = gtk::Button::with_label("Install update");
+    install_button.add_css_class("suggested-action");
     install_button.set_visible(false);
     let skip_button = gtk::Button::with_label("Skip this version");
     skip_button.set_visible(false);
@@ -1252,18 +1267,24 @@ fn show_update_status_window(app: &adw::Application) {
         close_button.connect_clicked(move |_| update_window.close());
     }
 
+    let button_spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    button_spacer.set_hexpand(true);
     let button_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    button_row.set_halign(gtk::Align::End);
     button_row.append(&skip_button);
-    button_row.append(&install_button);
+    button_row.append(&button_spacer);
     button_row.append(&close_button);
+    button_row.append(&install_button);
 
-    let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
-    content.set_margin_top(12);
-    content.set_margin_bottom(12);
-    content.set_margin_start(16);
-    content.set_margin_end(16);
-    content.append(&status);
+    let heading = gtk::Box::new(gtk::Orientation::Vertical, 3);
+    heading.append(&title);
+    heading.append(&status);
+
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 14);
+    content.set_margin_top(16);
+    content.set_margin_bottom(16);
+    content.set_margin_start(20);
+    content.set_margin_end(20);
+    content.append(&heading);
     content.append(&notes_scroller);
     content.append(&button_row);
 
