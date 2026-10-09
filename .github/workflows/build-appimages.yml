@@ -186,7 +186,8 @@ jobs:
           if [[ -n "${tag_version}" ]]; then version="${tag_version}"; fi
           echo "Publishing version: $version"
 
-          # Generate user-friendly release notes from git history
+          # Hand-written notes committed as release-notes-<version>.txt win; the notes
+          # generated from git history below are only a fallback.
           prev_tag="$(git tag --sort=-v:refname | head -n2 | tail -n1)"
           repo_url="https://github.com/${GITHUB_REPOSITORY}"
           notes_file="release-notes-${version}.txt"
@@ -197,6 +198,9 @@ jobs:
           fi
 
           # Build release notes: try conventional commits first, fall back to plain list
+          if [[ -f "${notes_file}" ]]; then
+            echo "Using committed ${notes_file}"
+          else
           {
             echo "## What's New"
             echo ""
@@ -248,8 +252,9 @@ jobs:
               echo ""
             fi
           } > "${notes_file}"
+          fi
 
-          echo "Generated release notes:"
+          echo "Release notes:"
           head -15 "${notes_file}"
 
           # Build publish script args
@@ -265,6 +270,8 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v5
+
       - name: Download all artifacts
         uses: actions/download-artifact@v7
         with:
@@ -277,8 +284,19 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           tag="${GITHUB_REF_NAME}"
+          # The in-app updater shows the release body, so use the committed notes
+          # when there are any; GitHub's generated notes are only a changelog link.
+          notes_file="release-notes-${tag#v}.txt"
           if gh release view "$tag" --repo "$GH_REPO" >/dev/null 2>&1; then
             gh release upload "$tag" release-artifacts/* --clobber --repo "$GH_REPO"
+            if [ -f "$notes_file" ]; then
+              gh release edit "$tag" --notes-file "$notes_file" --repo "$GH_REPO"
+            fi
+          elif [ -f "$notes_file" ]; then
+            gh release create "$tag" release-artifacts/* \
+              --title "$tag" \
+              --notes-file "$notes_file" \
+              --repo "$GH_REPO"
           else
             gh release create "$tag" release-artifacts/* \
               --title "$tag" \

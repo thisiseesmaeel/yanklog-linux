@@ -1,0 +1,14 @@
+YankLog 2.4 for Linux brings the new design from the Mac app and tightens privacy.
+
+- A redesigned main window groups history into Pinned, Today, Yesterday, and Earlier, with one-line rows and actions on the row you point at.
+- Quick Pick now shows the full text of the highlighted clip beside the list, and Tab switches between all and pinned clips.
+- Quick Pick opens much faster: the keyboard shortcut now uses the app that is already running.
+- Settings use the standard GNOME preferences layout, with one setting per row.
+- Changes to privacy rules, the history limit, and the keep-history period now apply at once, without a restart.
+- Pausing is more dependable: nothing copied while paused is saved, and a pause stays on after a restart.
+- New copies, and pins or deletions made in Quick Pick, appear in the main window straight away.
+- You can type "j" and "k" in Quick Pick search; Vim-style movement is now Ctrl+J and Ctrl+K.
+- Starting at login no longer runs a second copy of the app, which could show a second tray icon.
+- Search matches % and _ exactly as typed.
+
+This release also fixes the update window size and several list and error-reporting issues.
