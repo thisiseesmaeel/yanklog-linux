@@ -16,7 +16,10 @@ use yanklog_core::{
     ClipboardMonitor, Config, Database, Platform, Profile, ThemePreference,
 };
 
-use crate::logic::{content_summary, section_title, truncate_preview, PauseState, SecretHint};
+use crate::logic::{
+    content_summary, diff_rows, listen_for_signals, section_title, signal_running_instance,
+    truncate_preview, PauseState, SecretHint,
+};
 
 const DIRECT_APP_ID: &str = "com.yanklog.app";
 const FLATPAK_APP_ID: &str = "com.yanklog.YankLog";
@@ -135,6 +138,17 @@ window.quick-picker-window {
   background: @window_bg_color;
   border: 1px solid @borders;
   border-radius: 14px;
+  animation: picker-in 120ms ease-out;
+}
+
+@keyframes picker-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes row-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 .app-title {
@@ -206,6 +220,8 @@ window.quick-picker-window {
   color: @window_fg_color;
   border-radius: 8px;
   margin: 1px 0;
+  transition: background 120ms ease-out;
+  animation: row-in 140ms ease-out;
 }
 
 .history-row:hover {
@@ -244,6 +260,7 @@ button.entry-action:hover {
 
 .entry-actions {
   opacity: 0;
+  transition: opacity 120ms ease-out;
 }
 
 .history-row:hover .entry-actions,
@@ -358,7 +375,10 @@ pub fn run() {
     }
 
     if std::env::args().any(|arg| arg == "--pick" || arg == "-p") {
-        run_quick_picker();
+        // The running app shows Quick Pick at once; a standalone picker is the fallback.
+        if !signal_running_instance(&quick_pick_socket_path(&profile())) {
+            run_quick_picker();
+        }
         return;
     }
 
@@ -395,6 +415,10 @@ fn apply_theme(config: &Config) {
         ThemePreference::Light => adw::ColorScheme::ForceLight,
         ThemePreference::Dark => adw::ColorScheme::ForceDark,
     });
+}
+
+fn quick_pick_socket_path(profile: &Profile) -> PathBuf {
+    profile.data_dir().join("quick-pick.sock")
 }
 
 fn profile() -> Profile {
@@ -589,7 +613,9 @@ fn build_main_window(app: &adw::Application, present_window: bool) {
         database,
         config,
         monitor,
+        history_revision: Arc::clone(&history_revision),
         list,
+        row_keys: Rc::new(RefCell::new(Vec::new())),
         search_entry,
         status_label: action_status.clone(),
         result_label,
@@ -601,6 +627,25 @@ fn build_main_window(app: &adw::Application, present_window: bool) {
         undo_button: undo_button.clone(),
     });
     refresh_entries(&state, None);
+
+    {
+        // `yanklog --pick` signals this process, so Quick Pick opens without starting
+        // a second program.
+        let shared = picker_shared(&state);
+        let listening = listen_for_signals(quick_pick_socket_path(&profile), move || {
+            let shared = shared.clone();
+            glib::idle_add_once(move || {
+                let app = gtk::gio::Application::default()
+                    .and_then(|app| app.downcast::<adw::Application>().ok());
+                if let Some(app) = app {
+                    show_quick_picker_window(&app, Some(shared));
+                }
+            });
+        });
+        if let Err(error) = listening {
+            eprintln!("Quick Pick will open as a separate process: {error}");
+        }
+    }
 
     {
         let state = Rc::clone(&state);
@@ -629,13 +674,17 @@ fn build_main_window(app: &adw::Application, present_window: bool) {
     }
 
     {
-        // Show clips recorded by the monitor thread without waiting for a user action.
+        // Follow history changes made elsewhere: clips recorded by the monitor thread,
+        // and pins or deletions made in Quick Pick, which uses its own connection.
         let state = Rc::clone(&state);
         let seen_revision = Cell::new(history_revision.load(Ordering::SeqCst));
-        glib::timeout_add_local(Duration::from_millis(700), move || {
+        let seen_data_version = Cell::new(database_data_version(&state));
+        glib::timeout_add_local(Duration::from_millis(500), move || {
             let revision = history_revision.load(Ordering::SeqCst);
-            if revision != seen_revision.get() {
+            let data_version = database_data_version(&state);
+            if revision != seen_revision.get() || data_version != seen_data_version.get() {
                 seen_revision.set(revision);
+                seen_data_version.set(data_version);
                 refresh_with_current_query(&state);
             }
             glib::ControlFlow::Continue
@@ -1115,7 +1164,9 @@ fn setup_tray(
                 TrayCommand::Show => {
                     window.present();
                 }
-                TrayCommand::QuickPick => show_quick_picker_window(&app),
+                TrayCommand::QuickPick => {
+                    show_quick_picker_window(&app, Some(picker_shared(&state)))
+                }
                 TrayCommand::CheckUpdate => show_update_status_window(&app),
                 TrayCommand::Settings => {
                     show_preferences_window(&app, &profile(), Rc::clone(&state))
@@ -1846,7 +1897,9 @@ struct AppState {
     database: Arc<Mutex<Database>>,
     config: Arc<Mutex<Config>>,
     monitor: Arc<ClipboardMonitor>,
+    history_revision: Arc<AtomicU64>,
     list: gtk::ListBox,
+    row_keys: Rc<RefCell<Vec<String>>>,
     search_entry: gtk::SearchEntry,
     status_label: gtk::Label,
     result_label: gtk::Label,
@@ -1890,76 +1943,134 @@ fn load_history_page(state: &AppState, query: &str) -> Result<HistoryPage, Strin
     Ok((entries, total, offset))
 }
 
-fn refresh_entries(state: &AppState, query: Option<String>) {
-    while let Some(child) = state.list.first_child() {
-        state.list.remove(&child);
-    }
+/// What one row of the history list shows.
+enum RowSpec {
+    Header(&'static str),
+    Entry(yanklog_core::ClipboardEntry),
+    Message(String),
+}
 
+impl RowSpec {
+    /// Changes whenever the row would look different, so unchanged rows are kept.
+    fn key(&self, preview_limit: usize) -> String {
+        match self {
+            RowSpec::Header(title) => format!("header:{title}"),
+            RowSpec::Message(message) => format!("message:{message}"),
+            RowSpec::Entry(entry) => format!(
+                "entry:{}:{}:{}:{preview_limit}",
+                entry.id,
+                entry.is_favorite,
+                yanklog_core::format_timestamp(&entry.timestamp)
+            ),
+        }
+    }
+}
+
+fn refresh_entries(state: &AppState, query: Option<String>) {
     let query = query.unwrap_or_default();
     let query = query.trim();
-    let (entries, total, offset) = match load_history_page(state, query) {
-        Ok(page) => page,
-        Err(error) => {
-            state.previous_button.set_sensitive(false);
-            state.next_button.set_sensitive(false);
-            state.result_label.set_text("");
-            append_empty_state(&state.list, "Clipboard history is unavailable", 120);
-            show_status(
-                &state.status_label,
-                &format!("Could not read history: {error}"),
-            );
-            return;
-        }
-    };
-
-    state.previous_button.set_sensitive(offset > 0);
-    state
-        .next_button
-        .set_sensitive(offset.saturating_add(entries.len()) < total);
-    let result_text = if total == 0 {
-        "0 items".to_string()
-    } else if total <= HISTORY_PAGE_SIZE {
-        format!("{total} item{}", if total == 1 { "" } else { "s" })
-    } else {
-        format!(
-            "{}–{} of {}",
-            offset + 1,
-            offset.saturating_add(entries.len()),
-            total
-        )
-    };
-    state.result_label.set_text(&result_text);
-
-    if entries.is_empty() {
-        append_empty_state(
-            &state.list,
-            if query.is_empty() {
-                "No clipboard history yet"
-            } else {
-                "No matching clipboard items"
-            },
-            120,
-        );
-        return;
-    }
-
-    let today = chrono::Local::now().date_naive();
     let preview_limit = state
         .config
         .lock()
         .map(|config| config.max_preview_length)
         .unwrap_or(160);
-    let mut current_section = "";
-    for entry in entries {
-        let section = section_title(entry.is_favorite, &entry.timestamp, today);
-        if section != current_section {
-            current_section = section;
-            state.list.append(&section_header_row(section));
+
+    let specs: Vec<RowSpec> = match load_history_page(state, query) {
+        Ok((entries, total, offset)) => {
+            state.previous_button.set_sensitive(offset > 0);
+            state
+                .next_button
+                .set_sensitive(offset.saturating_add(entries.len()) < total);
+            let result_text = if total == 0 {
+                "0 items".to_string()
+            } else if total <= HISTORY_PAGE_SIZE {
+                format!("{total} item{}", if total == 1 { "" } else { "s" })
+            } else {
+                format!(
+                    "{}–{} of {}",
+                    offset + 1,
+                    offset.saturating_add(entries.len()),
+                    total
+                )
+            };
+            state.result_label.set_text(&result_text);
+
+            if entries.is_empty() {
+                vec![RowSpec::Message(
+                    if query.is_empty() {
+                        "No clipboard history yet"
+                    } else {
+                        "No matching clipboard items"
+                    }
+                    .to_string(),
+                )]
+            } else {
+                let today = chrono::Local::now().date_naive();
+                let mut specs = Vec::with_capacity(entries.len() + 4);
+                let mut current_section = "";
+                for entry in entries {
+                    let section = section_title(entry.is_favorite, &entry.timestamp, today);
+                    if section != current_section {
+                        current_section = section;
+                        specs.push(RowSpec::Header(section));
+                    }
+                    specs.push(RowSpec::Entry(entry));
+                }
+                specs
+            }
         }
-        state
-            .list
-            .append(&history_row(state, &entry, preview_limit));
+        Err(error) => {
+            state.previous_button.set_sensitive(false);
+            state.next_button.set_sensitive(false);
+            state.result_label.set_text("");
+            show_status(
+                &state.status_label,
+                &format!("Could not read history: {error}"),
+            );
+            vec![RowSpec::Message(
+                "Clipboard history is unavailable".to_string(),
+            )]
+        }
+    };
+
+    // Replace only the rows that changed; the rest keep their place and selection.
+    let new_keys: Vec<String> = specs.iter().map(|spec| spec.key(preview_limit)).collect();
+    let (prefix, removed, inserted) = diff_rows(&state.row_keys.borrow(), &new_keys);
+    for _ in 0..removed {
+        if let Some(row) = state.list.row_at_index(prefix as i32) {
+            state.list.remove(&row);
+        }
     }
+    for (offset, spec) in specs.iter().skip(prefix).take(inserted).enumerate() {
+        let row = match spec {
+            RowSpec::Header(title) => section_header_row(title),
+            RowSpec::Message(message) => message_row(message),
+            RowSpec::Entry(entry) => history_row(state, entry, preview_limit),
+        };
+        state.list.insert(&row, (prefix + offset) as i32);
+    }
+    state.row_keys.replace(new_keys);
+}
+
+fn message_row(message: &str) -> gtk::ListBoxRow {
+    let label = gtk::Label::new(Some(message));
+    label.add_css_class("empty-state");
+    label.set_margin_top(120);
+    label.set_margin_bottom(120);
+    let row = gtk::ListBoxRow::new();
+    row.add_css_class("section-row");
+    row.set_selectable(false);
+    row.set_activatable(false);
+    row.set_child(Some(&label));
+    row
+}
+
+fn database_data_version(state: &AppState) -> Option<i64> {
+    state
+        .database
+        .lock()
+        .ok()
+        .and_then(|database| database.data_version().ok())
 }
 
 fn append_empty_state(list: &gtk::ListBox, message: &str, margin: i32) {
@@ -2104,7 +2215,9 @@ impl AppState {
             database: Arc::clone(&self.database),
             config: Arc::clone(&self.config),
             monitor: Arc::clone(&self.monitor),
+            history_revision: Arc::clone(&self.history_revision),
             list: self.list.clone(),
+            row_keys: Rc::clone(&self.row_keys),
             search_entry: self.search_entry.clone(),
             status_label: self.status_label.clone(),
             result_label: self.result_label.clone(),
@@ -2441,28 +2554,75 @@ fn start_clipboard_monitor(
     });
 }
 
+/// What Quick Pick borrows from the running app, so it opens without unlocking the
+/// database again and its changes show in the main window straight away.
+#[derive(Clone)]
+struct PickerShared {
+    database: Arc<Mutex<Database>>,
+    config: Arc<Mutex<Config>>,
+    monitor: Arc<ClipboardMonitor>,
+    history_revision: Arc<AtomicU64>,
+}
+
+fn picker_shared(state: &AppState) -> PickerShared {
+    PickerShared {
+        database: Arc::clone(&state.database),
+        config: Arc::clone(&state.config),
+        monitor: Arc::clone(&state.monitor),
+        history_revision: Arc::clone(&state.history_revision),
+    }
+}
+
+/// Copies from Quick Pick, telling the running app's monitor about it when there is one.
+fn picker_copy(monitor: &Option<Arc<ClipboardMonitor>>, content: &str) {
+    if copy_to_clipboard(content).is_ok() {
+        if let Some(monitor) = monitor {
+            monitor.update_last_content(content);
+        }
+    }
+}
+
 fn run_quick_picker() {
     let application = adw::Application::builder()
         .application_id(picker_app_id())
         .build();
     application.connect_activate(|app| {
-        show_quick_picker_window(app);
+        show_quick_picker_window(app, None);
     });
     application.run_with_args(&["yanklog-picker"]);
 }
 
-fn show_quick_picker_window(app: &adw::Application) {
+fn show_quick_picker_window(app: &adw::Application, shared: Option<PickerShared>) {
     install_css();
-    let profile = profile();
-    let config = Rc::new(Config::load(&profile).unwrap_or_default());
-    apply_theme(&config);
-    let database = match open_database_with_secure_key(&profile) {
-        Ok(database) => Rc::new(database),
-        Err(err) => {
-            show_error_dialog(None, &format!("Failed to open yanklog database: {err}"));
-            return;
+    let (database, config, monitor, history_revision) = match shared {
+        Some(shared) => {
+            let config = shared
+                .config
+                .lock()
+                .map(|config| config.clone())
+                .unwrap_or_default();
+            (
+                shared.database,
+                config,
+                Some(shared.monitor),
+                Some(shared.history_revision),
+            )
+        }
+        None => {
+            let profile = profile();
+            let config = Config::load(&profile).unwrap_or_default();
+            apply_theme(&config);
+            let database = match open_database_with_secure_key(&profile) {
+                Ok(database) => Arc::new(Mutex::new(database)),
+                Err(err) => {
+                    show_error_dialog(None, &format!("Failed to open yanklog database: {err}"));
+                    return;
+                }
+            };
+            (database, config, None, None)
         }
     };
+    let config = Rc::new(config);
     let entries = Rc::new(std::cell::RefCell::new(Vec::new()));
     let pinned_only = Rc::new(Cell::new(false));
 
@@ -2584,7 +2744,7 @@ fn show_quick_picker_window(app: &adw::Application) {
     {
         let list = list.clone();
         let scroller = scroller.clone();
-        let database = Rc::clone(&database);
+        let database = Arc::clone(&database);
         let config = Rc::clone(&config);
         let entries = Rc::clone(&entries);
         let pinned_only = Rc::clone(&pinned_only);
@@ -2595,7 +2755,7 @@ fn show_quick_picker_window(app: &adw::Application) {
             let query = entry.text().to_string();
             let list = list.clone();
             let scroller = scroller.clone();
-            let database = Rc::clone(&database);
+            let database = Arc::clone(&database);
             let config = Rc::clone(&config);
             let entries = Rc::clone(&entries);
             let pinned_only = Rc::clone(&pinned_only);
@@ -2620,7 +2780,7 @@ fn show_quick_picker_window(app: &adw::Application) {
     {
         let list = list.clone();
         let scroller = scroller.clone();
-        let database = Rc::clone(&database);
+        let database = Arc::clone(&database);
         let config = Rc::clone(&config);
         let entries = Rc::clone(&entries);
         let pinned_only = Rc::clone(&pinned_only);
@@ -2642,9 +2802,10 @@ fn show_quick_picker_window(app: &adw::Application) {
     {
         let entries = Rc::clone(&entries);
         let window = window.clone();
+        let monitor = monitor.clone();
         list.connect_row_activated(move |_, row| {
             if let Some(entry) = entries.borrow().get(row.index() as usize) {
-                let _ = yanklog_core::copy_to_clipboard(&entry.content);
+                picker_copy(&monitor, &entry.content);
             }
             window.close();
         });
@@ -2657,12 +2818,14 @@ fn show_quick_picker_window(app: &adw::Application) {
         let scroller = scroller.clone();
         let entries = Rc::clone(&entries);
         let window = window.clone();
-        let database = Rc::clone(&database);
+        let database = Arc::clone(&database);
         let config = Rc::clone(&config);
         let search_entry = search_entry.clone();
         let pinned_only = Rc::clone(&pinned_only);
         let all_toggle = all_toggle.clone();
         let pinned_toggle = pinned_toggle.clone();
+        let monitor = monitor.clone();
+        let history_revision = history_revision.clone();
         key_controller.connect_key_pressed(move |_, key, _, modifiers| {
             if modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK) {
                 if let Some(index) = key
@@ -2677,7 +2840,7 @@ fn show_quick_picker_window(app: &adw::Application) {
                             .get(index)
                             .map(|entry| entry.content.clone());
                         if let Some(content) = content {
-                            let _ = copy_to_clipboard(&content);
+                            picker_copy(&monitor, &content);
                             window.close();
                         }
                         return glib::Propagation::Stop;
@@ -2691,8 +2854,11 @@ fn show_quick_picker_window(app: &adw::Application) {
                             .borrow()
                             .get(selected as usize)
                             .map(|entry| entry.id);
-                        if let Some(id) = selected_id {
+                        if let (Some(id), Ok(database)) = (selected_id, database.lock()) {
                             let _ = database.toggle_favorite(id);
+                        }
+                        if let Some(revision) = &history_revision {
+                            revision.fetch_add(1, Ordering::SeqCst);
                         }
                         populate_quick_picker_rows(
                             &list,
@@ -2725,8 +2891,11 @@ fn show_quick_picker_window(app: &adw::Application) {
                             .borrow()
                             .get(selected as usize)
                             .map(|entry| entry.id);
-                        if let Some(id) = selected_id {
+                        if let (Some(id), Ok(database)) = (selected_id, database.lock()) {
                             let _ = database.delete_entry(id);
+                        }
+                        if let Some(revision) = &history_revision {
+                            revision.fetch_add(1, Ordering::SeqCst);
                         }
                         populate_quick_picker_rows(
                             &list,
@@ -2786,7 +2955,7 @@ fn show_quick_picker_window(app: &adw::Application) {
                             .map(|entry| entry.content.clone())
                     });
                     if let Some(content) = content {
-                        let _ = yanklog_core::copy_to_clipboard(&content);
+                        picker_copy(&monitor, &content);
                     }
                     window.close();
                     glib::Propagation::Stop
@@ -2901,12 +3070,15 @@ fn scroll_quick_picker_row_into_view(scroller: &gtk::ScrolledWindow, row: &gtk::
 
 fn populate_quick_picker_rows(
     list: &gtk::ListBox,
-    database: &Database,
+    database: &Mutex<Database>,
     config: &Config,
     entries: &Rc<std::cell::RefCell<Vec<yanklog_core::ClipboardEntry>>>,
     query: &str,
     pinned_only: bool,
 ) {
+    let Ok(database) = database.lock() else {
+        return;
+    };
     while let Some(child) = list.first_child() {
         list.remove(&child);
     }
@@ -2979,15 +3151,11 @@ fn populate_quick_picker_rows(
 }
 
 fn show_preferences_window(app: &adw::Application, profile: &Profile, state: Rc<AppState>) {
-    let window = gtk::ApplicationWindow::builder()
-        .application(app)
-        .title("Settings")
-        .default_width(620)
-        .default_height(640)
-        .decorated(true)
-        .resizable(true)
-        .build();
-    window.set_size_request(520, 420);
+    let window = adw::PreferencesWindow::new();
+    window.set_application(Some(app));
+    window.set_title(Some("Settings"));
+    window.set_default_size(640, 660);
+    window.set_search_enabled(false);
     let shared_config = Arc::clone(&state.config);
     let config = shared_config
         .lock()
@@ -3025,149 +3193,135 @@ fn show_preferences_window(app: &adw::Application, profile: &Profile, state: Rc<
     launch_at_startup.set_active(config.launch_at_startup);
     let shortcut_help_button = gtk::Button::with_label("Shortcut setup");
 
-    let general_page = gtk::Box::new(gtk::Orientation::Vertical, 18);
-    let (startup_section, startup_card) = settings_card("Startup");
-    startup_card.append(&settings_row(
+    let general_page = preference_page("General", "preferences-system-symbolic");
+    let startup_group = preference_group("Startup");
+    startup_group.set_description(Some("Changes on every tab save automatically."));
+    startup_group.add(&preference_row(
         &format!("Start {} at login", profile.display_name()),
         Some("Starts quietly in the tray when you sign in."),
         &launch_at_startup,
     ));
-    let (appearance_section, appearance_card) = settings_card("Appearance");
-    appearance_card.append(&settings_row("Theme", None, &theme_mode));
-    let (history_section, history_card) = settings_card("History");
-    history_card.append(&settings_row(
+    let appearance_group = preference_group("Appearance");
+    appearance_group.add(&preference_row("Theme", None, &theme_mode));
+    let history_group = preference_group("History");
+    history_group.add(&preference_row(
         "History limit",
         Some("Older unpinned items are removed first."),
         &history_limit,
     ));
-    history_card.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
-    history_card.append(&settings_row(
+    history_group.add(&preference_row(
         "Preview length",
         Some("Characters kept for each row."),
         &preview_length,
     ));
-    history_card.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
-    history_card.append(&settings_row(
+    history_group.add(&preference_row(
         "Keep history",
         Some("Days to keep unpinned items. 0 keeps them forever."),
         &retention_days,
     ));
-    general_page.append(&startup_section);
-    general_page.append(&appearance_section);
-    general_page.append(&history_section);
+    general_page.add(&startup_group);
+    general_page.add(&appearance_group);
+    general_page.add(&history_group);
 
-    let quick_pick_page = gtk::Box::new(gtk::Orientation::Vertical, 18);
-    let (shortcut_section, shortcut_card) = settings_card("Keyboard shortcut");
-    let command_box = gtk::Box::new(gtk::Orientation::Vertical, 8);
-    command_box.add_css_class("settings-row");
-    command_box.append(&info_row("Command", &quick_picker_command_text()));
-    command_box.append(&settings_note(
-        "Bind this command in your desktop keyboard settings. Linux shortcut registration is handled by the desktop environment, so GNOME, KDE, Xfce, and other distros expose it in different places.",
+    let quick_pick_page = preference_page("Quick Pick", "edit-find-symbolic");
+    let shortcut_group = preference_group("Keyboard shortcut");
+    shortcut_group.set_description(Some(
+        "Bind this command in your desktop keyboard settings. Shortcut registration is handled by the desktop environment, so GNOME, KDE, Xfce and others expose it in different places.",
     ));
-    shortcut_help_button.set_halign(gtk::Align::Start);
-    command_box.append(&shortcut_help_button);
-    shortcut_card.append(&command_box);
-    let (picker_section, picker_card) = settings_card("Window");
-    picker_card.append(&settings_row(
+    shortcut_group.add(&preference_row(
+        "Command",
+        Some(glib::markup_escape_text(&quick_picker_command_text()).as_str()),
+        &shortcut_help_button,
+    ));
+    let picker_group = preference_group("Window");
+    picker_group.add(&preference_row(
         "Visible items",
         Some("Pinned clips take at most half the list."),
         &quick_pick_items,
     ));
-    picker_card.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
-    picker_card.append(&settings_row("Opacity", None, &quick_pick_opacity));
-    quick_pick_page.append(&shortcut_section);
-    quick_pick_page.append(&picker_section);
+    picker_group.add(&preference_row("Opacity", None, &quick_pick_opacity));
+    quick_pick_page.add(&shortcut_group);
+    quick_pick_page.add(&picker_group);
 
-    let privacy_page = gtk::Box::new(gtk::Orientation::Vertical, 18);
-    let (never_section, never_card) = settings_card("Never record");
-    never_card.append(&settings_row(
+    let privacy_page = preference_page("Privacy", "channel-secure-symbolic");
+    let never_group = preference_group("Never record");
+    never_group.add(&preference_row(
         "Secret-like values",
         Some("Passwords, API keys and private tokens."),
         &ignore_secret_like,
     ));
-    never_card.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
-    never_card.append(&settings_row(
+    never_group.add(&preference_row(
         "One-time codes",
         Some("Short numeric verification codes."),
         &ignore_one_time_codes,
     ));
-    let (rules_section, rules_card) = settings_card("Text rules");
-    rules_card.append(&settings_row(
+    let rules_group = preference_group("Text rules");
+    rules_group.add(&preference_row(
         "Minimum length",
         Some("Characters."),
         &min_text_length,
     ));
-    rules_card.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
-    rules_card.append(&settings_row(
+    rules_group.add(&preference_row(
         "Maximum length",
         Some("Characters. 0 means no limit."),
         &max_text_length,
     ));
-    rules_card.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
-    let ignored_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
-    ignored_box.add_css_class("settings-row");
-    let ignored_title = gtk::Label::new(Some("Ignored words"));
-    ignored_title.set_xalign(0.0);
-    ignored_box.append(&ignored_title);
-    ignored_box.append(&ignored_patterns);
-    ignored_box.append(&settings_note(
+    let ignored_group = preference_group("Ignored words");
+    ignored_group.set_description(Some(
         "Separate words with commas. Anything you copy that contains one of them is skipped.",
     ));
-    rules_card.append(&ignored_box);
-    privacy_page.append(&never_section);
-    privacy_page.append(&rules_section);
+    ignored_group.add(&ignored_patterns);
+    privacy_page.add(&never_group);
+    privacy_page.add(&rules_group);
+    privacy_page.add(&ignored_group);
 
+    // Sub-dialogs report through this label; the window shows what it says as a toast.
     let preferences_status = gtk::Label::new(None);
-    preferences_status.set_xalign(1.0);
-    preferences_status.set_hexpand(true);
-    preferences_status.add_css_class("status-toast");
-    let storage = storage_panel(&window, profile, &preferences_status, Rc::clone(&state));
+    {
+        let window = window.downgrade();
+        preferences_status.connect_label_notify(move |label| {
+            let text = label.text();
+            if text.is_empty() || text.as_str() == "Saved automatically" {
+                return;
+            }
+            if let Some(window) = window.upgrade() {
+                window.add_toast(adw::Toast::new(text.as_str()));
+            }
+        });
+    }
+    let storage = storage_page(
+        window.upcast_ref::<gtk::Window>(),
+        profile,
+        &preferences_status,
+        Rc::clone(&state),
+    );
 
-    let about_page = gtk::Box::new(gtk::Orientation::Vertical, 18);
-    let (about_section, about_card) = settings_card("About");
-    let about_box = gtk::Box::new(gtk::Orientation::Vertical, 10);
-    about_box.add_css_class("settings-row");
-    about_box.append(&info_row("Version", APP_VERSION));
-    about_box.append(&info_row(
+    let about_page = preference_page("About", "help-about-symbolic");
+    let about_group = preference_group("About");
+    about_group.set_description(Some(
+        "YankLog keeps clipboard content on this device and does not transmit your history.",
+    ));
+    about_group.add(&preference_row(
+        "Version",
+        None,
+        &gtk::Label::new(Some(APP_VERSION)),
+    ));
+    about_group.add(&preference_row(
         "Distribution",
-        if is_flatpak_build() {
+        None,
+        &gtk::Label::new(Some(if is_flatpak_build() {
             "Flatpak"
         } else {
             "Linux direct install / AppImage"
-        },
+        })),
     ));
-    about_card.append(&about_box);
-    about_page.append(&about_section);
-    about_page.append(&settings_note(
-        "YankLog keeps clipboard content on this device and does not transmit your history.",
-    ));
+    about_page.add(&about_group);
 
-    let stack = gtk::Stack::new();
-    stack.set_transition_type(gtk::StackTransitionType::Crossfade);
-    stack.set_vexpand(true);
-    stack.set_vhomogeneous(false);
-    stack.add_titled(&general_page, Some("general"), "General");
-    stack.add_titled(&quick_pick_page, Some("quick-pick"), "Quick Pick");
-    stack.add_titled(&privacy_page, Some("privacy"), "Privacy");
-    stack.add_titled(&storage, Some("storage"), "Storage");
-    stack.add_titled(&about_page, Some("about"), "About");
-    let switcher = gtk::StackSwitcher::new();
-    switcher.set_stack(Some(&stack));
-    switcher.set_halign(gtk::Align::Center);
-
-    let footer = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-    footer.append(&settings_note("Changes save automatically"));
-    footer.append(&preferences_status);
-
-    let content = gtk::Box::new(gtk::Orientation::Vertical, 18);
-    content.add_css_class("app-root");
-    content.set_margin_top(14);
-    content.set_margin_bottom(18);
-    content.set_margin_start(28);
-    content.set_margin_end(28);
-    content.append(&switcher);
-    content.append(&stack);
-    content.append(&footer);
+    window.add(&general_page);
+    window.add(&quick_pick_page);
+    window.add(&privacy_page);
+    window.add(&storage);
+    window.add(&about_page);
 
     {
         let app = app.clone();
@@ -3190,14 +3344,36 @@ fn show_preferences_window(app: &adw::Application, profile: &Profile, state: Rc<
     };
     connect_auto_save_controls(&controls, profile, &shared_config, &preferences_status);
 
-    let scroller = gtk::ScrolledWindow::new();
-    scroller.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
-    scroller.set_hexpand(true);
-    scroller.set_vexpand(true);
-    scroller.set_child(Some(&content));
-
-    window.set_child(Some(&scroller));
     window.present();
+}
+
+fn preference_page(title: &str, icon_name: &str) -> adw::PreferencesPage {
+    let page = adw::PreferencesPage::new();
+    page.set_title(title);
+    page.set_icon_name(Some(icon_name));
+    page
+}
+
+fn preference_group(title: &str) -> adw::PreferencesGroup {
+    let group = adw::PreferencesGroup::new();
+    group.set_title(title);
+    group
+}
+
+/// One setting: its name and optional explanation, with its control at the end of the row.
+fn preference_row(
+    title: &str,
+    subtitle: Option<&str>,
+    control: &impl glib::object::IsA<gtk::Widget>,
+) -> adw::ActionRow {
+    let row = adw::ActionRow::new();
+    row.set_title(title);
+    if let Some(subtitle) = subtitle {
+        row.set_subtitle(subtitle);
+    }
+    control.set_valign(gtk::Align::Center);
+    row.add_suffix(control);
+    row
 }
 
 #[derive(Clone)]
@@ -3341,43 +3517,6 @@ fn spin_control(min: f64, max: f64, step: f64, value: f64) -> gtk::SpinButton {
     input
 }
 
-/// A titled group: returns the whole section and the card that rows are appended to.
-fn settings_card(title: &str) -> (gtk::Box, gtk::Box) {
-    let heading = gtk::Label::new(Some(&title.to_uppercase()));
-    heading.set_xalign(0.0);
-    heading.set_margin_start(4);
-    heading.add_css_class("section-title");
-    let card = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    card.add_css_class("settings-card");
-    let section = gtk::Box::new(gtk::Orientation::Vertical, 7);
-    section.append(&heading);
-    section.append(&card);
-    (section, card)
-}
-
-/// One setting: its name and optional explanation on the left, its control on the right.
-fn settings_row(
-    title: &str,
-    detail: Option<&str>,
-    control: &impl glib::object::IsA<gtk::Widget>,
-) -> gtk::Box {
-    let title_label = gtk::Label::new(Some(title));
-    title_label.set_xalign(0.0);
-    let text = gtk::Box::new(gtk::Orientation::Vertical, 2);
-    text.set_hexpand(true);
-    text.set_valign(gtk::Align::Center);
-    text.append(&title_label);
-    if let Some(detail) = detail {
-        text.append(&settings_note(detail));
-    }
-    control.set_valign(gtk::Align::Center);
-    let row = gtk::Box::new(gtk::Orientation::Horizontal, 16);
-    row.add_css_class("settings-row");
-    row.append(&text);
-    row.append(control);
-    row
-}
-
 fn theme_index(value: ThemePreference) -> u32 {
     match value {
         ThemePreference::System => 0,
@@ -3412,38 +3551,24 @@ fn info_row(label: &str, value: &str) -> gtk::Box {
     row
 }
 
-fn storage_panel(
-    parent: &gtk::ApplicationWindow,
+fn storage_page(
+    parent: &gtk::Window,
     profile: &Profile,
     status_label: &gtk::Label,
     state: Rc<AppState>,
-) -> gtk::Box {
+) -> adw::PreferencesPage {
     let database_path = profile.data_dir().join("history.db");
     let database_path_text = database_path.to_string_lossy().to_string();
-
-    let panel = gtk::Box::new(gtk::Orientation::Vertical, 18);
 
     let key_storage = if profile.data_dir().join("secret.key").exists() {
         "Protected local file (Secret Service unavailable)"
     } else {
         "Linux Secret Service"
     };
-    let note = settings_note(
-        "Clipboard history is stored locally. Backups use password-based XChaCha20-Poly1305 encryption.",
-    );
-    let path_row = info_row("Database", &database_path_text);
-    let key_row = info_row("Database key", key_storage);
-
     let copy_button = gtk::Button::with_label("Copy Path");
     let reveal_button = gtk::Button::with_label("Reveal in Files");
     let export_button = gtk::Button::with_label("Export Backup");
     let import_button = gtk::Button::with_label("Restore Backup");
-    let path_actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    path_actions.append(&copy_button);
-    path_actions.append(&reveal_button);
-    let backup_actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    backup_actions.append(&export_button);
-    backup_actions.append(&import_button);
 
     {
         let database_path_text = database_path_text.clone();
@@ -3541,28 +3666,38 @@ fn storage_panel(
         });
     }
 
-    let (history_section, history_card) = settings_card("Encrypted history");
-    let history_box = gtk::Box::new(gtk::Orientation::Vertical, 10);
-    history_box.add_css_class("settings-row");
-    history_box.append(&path_row);
-    history_box.append(&key_row);
-    history_box.append(&path_actions);
-    history_card.append(&history_box);
+    let history_group = preference_group("Encrypted history");
+    let database_row = preference_row(
+        "Database",
+        Some(glib::markup_escape_text(&database_path_text).as_str()),
+        &copy_button,
+    );
+    reveal_button.set_valign(gtk::Align::Center);
+    database_row.add_suffix(&reveal_button);
+    history_group.add(&database_row);
+    history_group.add(&preference_row(
+        "Database key",
+        None,
+        &gtk::Label::new(Some(key_storage)),
+    ));
 
-    let (backup_section, backup_card) = settings_card("Portable backup");
-    let backup_box = gtk::Box::new(gtk::Orientation::Vertical, 10);
-    backup_box.add_css_class("settings-row");
-    backup_box.append(&note);
-    backup_box.append(&backup_actions);
-    backup_card.append(&backup_box);
+    let backup_group = preference_group("Portable backup");
+    backup_group.set_description(Some(
+        "Clipboard history is stored locally. Backups use password-based XChaCha20-Poly1305 encryption.",
+    ));
+    let backup_row = preference_row("Encrypted backup", None, &export_button);
+    import_button.set_valign(gtk::Align::Center);
+    backup_row.add_suffix(&import_button);
+    backup_group.add(&backup_row);
 
-    panel.append(&history_section);
-    panel.append(&backup_section);
-    panel
+    let page = preference_page("Storage", "drive-harddisk-symbolic");
+    page.add(&history_group);
+    page.add(&backup_group);
+    page
 }
 
 fn show_export_backup_dialog(
-    parent: &gtk::ApplicationWindow,
+    parent: &gtk::Window,
     profile: &Profile,
     state: Rc<AppState>,
     path: PathBuf,
@@ -3660,7 +3795,7 @@ fn show_export_backup_dialog(
 }
 
 fn show_import_backup_dialog(
-    parent: &gtk::ApplicationWindow,
+    parent: &gtk::Window,
     profile: &Profile,
     state: Rc<AppState>,
     path: PathBuf,

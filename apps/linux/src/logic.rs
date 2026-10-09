@@ -1,4 +1,6 @@
-use std::path::PathBuf;
+use std::io::Write;
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -148,6 +150,60 @@ impl SecretHint {
     }
 }
 
+/// Asks the running app, listening at `path`, to act. Returns false when no app
+/// is listening, so the caller can do the work itself.
+pub fn signal_running_instance(path: &Path) -> bool {
+    UnixStream::connect(path)
+        .and_then(|mut stream| stream.write_all(b"1"))
+        .is_ok()
+}
+
+/// Calls `on_signal` on a background thread each time another process signals `path`.
+pub fn listen_for_signals(
+    path: PathBuf,
+    on_signal: impl Fn() + Send + 'static,
+) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    // A socket file left by an earlier run would make binding fail.
+    match std::fs::remove_file(&path) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
+        _ => {}
+    }
+    let listener = UnixListener::bind(&path)?;
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            if stream.is_ok() {
+                on_signal();
+            }
+        }
+    });
+    Ok(())
+}
+
+/// How to turn the row list `old` into `new` by replacing one middle run:
+/// `(unchanged_prefix, rows_to_remove, rows_to_insert)`. Rows outside that run
+/// are left alone, which keeps their selection, scroll position and state.
+pub fn diff_rows(old: &[String], new: &[String]) -> (usize, usize, usize) {
+    let prefix = old
+        .iter()
+        .zip(new)
+        .take_while(|(before, after)| before == after)
+        .count();
+    let suffix = old[prefix..]
+        .iter()
+        .rev()
+        .zip(new[prefix..].iter().rev())
+        .take_while(|(before, after)| before == after)
+        .count();
+    (
+        prefix,
+        old.len() - prefix - suffix,
+        new.len() - prefix - suffix,
+    )
+}
+
 /// The history section an entry belongs to.
 pub fn section_title(is_pinned: bool, timestamp: &str, today: NaiveDate) -> &'static str {
     if is_pinned {
@@ -241,6 +297,50 @@ mod tests {
         assert_eq!(truncate_preview("abcdef", 3), "abc...");
         assert_eq!(content_summary("x"), "1 character · 1 line");
         assert_eq!(content_summary("ab\ncd"), "5 characters · 2 lines");
+    }
+
+    #[test]
+    fn diff_replaces_only_the_changed_run() {
+        let rows = |items: &[&str]| {
+            items
+                .iter()
+                .map(|item| item.to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            diff_rows(&rows(&["a", "b", "c"]), &rows(&["a", "b", "c"])),
+            (3, 0, 0)
+        );
+        assert_eq!(
+            diff_rows(&rows(&["a", "b", "c"]), &rows(&["x", "a", "b", "c"])),
+            (0, 0, 1)
+        );
+        assert_eq!(
+            diff_rows(&rows(&["a", "b", "c"]), &rows(&["a", "c"])),
+            (1, 1, 0)
+        );
+        assert_eq!(
+            diff_rows(&rows(&["a", "b", "c"]), &rows(&["a", "x", "y", "c"])),
+            (1, 1, 2)
+        );
+        assert_eq!(diff_rows(&rows(&[]), &rows(&["a"])), (0, 0, 1));
+        assert_eq!(diff_rows(&rows(&["a", "a"]), &rows(&["a"])), (1, 1, 0));
+    }
+
+    #[test]
+    fn a_running_instance_receives_signals() {
+        let path = temp_path("signal.sock");
+        let _ = std::fs::remove_file(&path);
+        assert!(!signal_running_instance(&path));
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        listen_for_signals(path.clone(), move || {
+            let _ = sender.send(());
+        })
+        .unwrap();
+        assert!(signal_running_instance(&path));
+        assert!(receiver.recv_timeout(Duration::from_secs(2)).is_ok());
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
